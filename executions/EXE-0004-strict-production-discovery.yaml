@@ -1,0 +1,147 @@
+metadata:
+  execution_id: EXE-0004
+  title: Strict YouTube-only production discovery cutover
+  status: completed
+  owners:
+    - engineering
+    - qa_security
+    - orchestrator
+  directive_refs:
+    - DIR-0001
+  last_updated: 2026-07-13
+
+scope:
+  objective: Enforce real YouTube Data API discovery in the MVP runtime path with no silent mock fallback, so downstream behavior is validated only on real discovery inputs.
+  in_scope:
+    - remove silent mock discovery fallback from the MVP and production execution path
+    - keep explicit config gating between production discovery and test or mock discovery behavior
+    - add deterministic degraded handling for missing config, timeout, quota, malformed payload, and empty-result cases
+    - add structured logging for discovery failure, degraded behavior, and fallback-blocked events
+    - add regression coverage proving no mock substitution in strict production mode
+  out_of_scope:
+    - Hume or transcript emotion scoring integration
+    - window generation or selection redesign
+    - Layer B or Layer C cache implementation
+    - rendered fallback pipeline
+    - UI feature expansion beyond compatibility verification
+
+handoff:
+  owners:
+    orchestrator: DOE Orchestrator
+    project_manager: DOE Project Manager
+    ux_ui: N/A
+    engineering: DOE Full Stack Delivery
+    qa_security: DOE QA Security
+    ci_enforcement: N/A
+  acceptance_criteria:
+    - With DISCOVERY_PROVIDER=youtube-data-api in strict MVP mode, search discovery uses only YouTube Data API results.
+    - Discovery does not silently substitute mock results when config is missing, upstream fails, or quota is exhausted.
+    - Failure cases produce explicit degraded or failed job state without hanging jobs or changing API shapes.
+    - Empty real discovery results remain empty and do not trigger mock content.
+    - Structured logs capture discovery stage, provider, reason, and outcome without leaking secrets or raw upstream error bodies.
+    - Build and regression coverage remain green, including negative-path tests for discovery failures.
+  risk_tier: high
+  risk_rationale: Silent discovery fallback currently masks production reliability, quota, and input-quality issues, creating a release-trust gap at the first upstream boundary.
+  threat_or_abuse_assumptions:
+    - invalid or missing discovery credentials may otherwise cause hidden fallback to non-production data
+    - quota, timeout, and malformed payload scenarios must fail closed rather than fabricate results
+    - repeated searches with valid tokens still require explicit degraded handling to avoid hidden compute paths
+  validation_plan:
+    engineering:
+      - npm run build
+      - npm test
+      - integration tests for discovery success, missing key, timeout, quota, malformed payload, and empty real-result cases
+    qa_security:
+      - negative-path verification for config missing, invalid key, quota, timeout, and payload corruption
+      - log-sanitization review for discovery failures and degraded outcomes
+    ci_enforcement:
+      - N/A until CI expansion is requested
+  release_gates:
+    - strict production discovery mode is implemented and exercised in automated tests
+    - no mock substitution occurs in MVP or production discovery mode
+    - degraded and failed discovery outcomes are observable and contract-safe
+    - API contracts remain unchanged
+    - mock discovery remains isolated to non-production or explicit test mode
+  rollback_expectation:
+    - revert strict discovery mode behavior in one deploy if necessary, without changing API contracts or persisted data
+
+quality_gates:
+  definition_of_ready:
+    project_manager: pass
+    ux_ui: n/a
+    qa_security: pass
+    ci_enforcement: n/a
+    notes:
+      - This slice is the next must-have MVP blocker from PM and QA risk ranking.
+      - Scope remains backend-focused and preserves current client contracts.
+  definition_of_done:
+    engineering: pass
+    qa_security: pass
+    ci_enforcement: n/a
+    orchestrator: pass
+    notes:
+      - Engineering implemented strict discovery mode, removed silent mock substitution in youtube-data-api mode, classified discovery failures, and added negative-path regression coverage.
+      - QA/security verified the slice with build passing and 19 of 19 tests passing, including strict-mode no-fallback, malformed payload, quota, timeout, and empty-result scenarios.
+
+backlog:
+  items:
+    - SLICE-7-strict-production-discovery
+    - next-execution-slice-governance
+  dependencies:
+    - EXE-0001 through EXE-0003 completed on branch 2026/feat/mvp-foundation-app
+    - valid YouTube Data API runtime configuration
+
+implementation:
+  systems_touched:
+    - discovery provider
+    - job orchestrator
+    - runtime config
+    - logging
+    - tests
+  approach:
+    - separate strict production discovery behavior from explicit mock or test behavior
+    - fail closed in MVP mode when real discovery cannot proceed
+    - keep the current API and polling contracts unchanged while surfacing degraded or failed states explicitly
+    - add negative-path regression coverage proving no mock substitution
+  preview:
+    run_command: npm run dev
+    verification: Discovery in strict mode uses real YouTube results or degrades explicitly without producing mock clips; search, job polling, and clips contracts remain unchanged.
+  deployment:
+    free_host_provider: Vercel
+    steps:
+      - configure DISCOVERY_PROVIDER and YOUTUBE_DATA_API_KEY in the host dashboard
+      - run npm run build during deployment
+      - verify real-result, empty-result, and degraded discovery flows after deploy
+  rollback:
+    - switch affected environments back to explicit mock discovery mode only in non-production contexts
+    - revert code if necessary without changing response contracts
+
+validation:
+  engineering_checks:
+    - build
+    - discovery provider integration tests
+    - contract regression tests for search and polling flows
+  qa_checks:
+    - strict-mode success, empty result, timeout, quota, and malformed payload scenarios
+    - no mock substitution in MVP discovery mode
+    - API contract regression for search, job status, and clips endpoints
+  security_checks:
+    - no API key or raw upstream error leakage in logs or client responses
+    - degraded discovery paths do not bypass auth or rate-limit enforcement
+    - discovery logs are present and sanitized
+  evidence:
+    - npm run build -> pass
+    - npm test -> pass (19/19 tests)
+    - strict discovery wrapper blocks mock substitution and emits provider_fallback_blocked
+    - discovery failure classification verified for missing config, invalid credentials, quota or 403, 429, timeout, malformed payload, and empty-result cases
+    - empty real discovery results produce explicit degraded job outcome without mock content
+    - real discovery provider failures produce explicit failed job outcome without hanging polling flow
+    - search, job status, and clips API payload shapes remained unchanged
+    - discovery logs do not expose API keys or raw upstream error bodies
+
+risk:
+  residual_risks:
+    - real discovery reliability now directly depends on YouTube Data API availability and quota
+    - downstream ranking quality gaps may become more visible once mock discovery is removed
+    - in-memory runtime behavior still differs from production-scale deployment
+  release_recommendation: go

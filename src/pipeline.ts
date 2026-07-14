@@ -303,7 +303,7 @@ export class ViralClipPipeline {
             provider: this.transcriptProvider.providerName,
             videoId: video.sourceId,
             reason: error instanceof ProviderError ? error.reason : 'failure',
-            detail: error instanceof Error ? error.message : 'Unknown upstream provider failure'
+            detail: error instanceof ProviderError ? error.message : 'Unknown upstream provider failure'
           });
           return null;
         }

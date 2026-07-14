@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { APP_CONFIG } from './config.js';
 import { type StructuredLogger, createStructuredLogger } from './logging.js';
 import { createPipeline, type ViralClipPipeline } from './pipeline.js';
+import { ProviderError } from './providers.js';
 import type { ClipCard, JobStage, JobState, JobStatus } from './types.js';
 import { delay, normalizeKeywords } from './utils.js';
 
@@ -64,6 +65,17 @@ export class JobStore {
       this.update(job, 'discovery');
       await delay(120);
       const videos = await this.pipeline.discover(job.keywords);
+      if (videos.length === 0) {
+        this.logger.warn('provider_degraded', {
+          jobId,
+          stage: 'discovery',
+          provider: this.pipeline.discoveryProviderName,
+          reason: 'empty_result',
+          outcome: 'degraded'
+        });
+        this.finish(job, 'degraded');
+        return;
+      }
 
       this.update(job, 'transcript');
       await delay(120);
@@ -106,15 +118,26 @@ export class JobStore {
 
       this.finish(job, packaged.length > 0 ? 'completed' : 'degraded');
     } catch (error) {
+      job.error = error instanceof ProviderError ? error.message : 'Unknown job failure';
+      const reason = error instanceof ProviderError ? error.reason : 'failure';
+      const stage = job.stage;
+      const provider = stage === 'discovery' ? this.pipeline.discoveryProviderName : this.pipeline.transcriptProviderName;
+      this.logger.warn('provider_failure', {
+        jobId,
+        stage,
+        provider,
+        reason,
+        detail: job.error,
+        outcome: 'failed'
+      });
       job.status = 'failed';
       job.stage = 'done';
       job.progressPct = APP_CONFIG.progressByStage.done;
-      job.error = error instanceof Error ? error.message : 'Unknown job failure';
       this.logger.error('job_failed', {
         jobId,
-        stage: job.stage,
-        provider: this.pipeline.transcriptProviderName,
-        reason: 'unhandled_job_failure',
+        stage,
+        provider,
+        reason,
         detail: job.error
       });
     }

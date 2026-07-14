@@ -21,7 +21,7 @@ TRANSCRIPT_CACHE_TTL_MS=900000
 TRUST_PROXY_HEADERS=false
 ```
 
-- `DISCOVERY_PROVIDER=youtube-data-api` enables real YouTube discovery and falls back to the deterministic mock adapter if the upstream request fails or the key is unavailable.
+- `DISCOVERY_PROVIDER=youtube-data-api` enables strict real YouTube discovery for the MVP path and degrades explicitly on missing config, upstream failure, quota issues, malformed payloads, or empty results without substituting mock content.
 - `TRANSCRIPT_PROVIDER=youtube-captions` performs real server-side caption retrieval from YouTube watch/caption endpoints, validates the normalized transcript before caching, and degrades explicitly on missing captions, timeout, or upstream failure.
 - `TRUST_PROXY_HEADERS=true` should only be enabled behind a trusted reverse proxy; the default keeps IP guardrails bound to the direct socket address.
 - Real transcript mode requires outbound access to YouTube and may still degrade when captions are unavailable, blocked, or throttled upstream.

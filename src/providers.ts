@@ -17,7 +17,14 @@ export interface TranscriptProvider {
   getTranscript(video: CandidateVideoLite, language: string): Promise<TranscriptCacheEntry | null>;
 }
 
-export type ProviderFailureReason = 'timeout' | 'failure' | 'unavailable';
+export type ProviderFailureReason =
+  | 'timeout'
+  | 'failure'
+  | 'unavailable'
+  | 'missing_config'
+  | 'invalid_credentials'
+  | 'quota_exceeded'
+  | 'malformed_payload';
 
 export class ProviderError extends Error {
   constructor(
@@ -64,6 +71,14 @@ interface YouTubePlayerResponse {
 }
 
 const sortVideos = (left: CandidateVideoLite, right: CandidateVideoLite) => left.sourceId.localeCompare(right.sourceId);
+
+const isObjectRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object';
+
+const isSearchResponse = (value: unknown): value is YouTubeSearchResponse =>
+  isObjectRecord(value) && (value.items === undefined || Array.isArray(value.items));
+
+const isVideosResponse = (value: unknown): value is YouTubeVideosResponse =>
+  isObjectRecord(value) && (value.items === undefined || Array.isArray(value.items));
 
 const parseIsoDuration = (value: string | undefined) => {
   if (!value) {
@@ -112,10 +127,6 @@ const fetchUpstream = async <TResponse>(
       throw error;
     }
 
-    if (error instanceof Error) {
-      throw new ProviderError(providerName, 'failure', error.message);
-    }
-
     throw new ProviderError(providerName, 'failure', 'Unknown upstream provider failure');
   } finally {
     clearTimeout(timeout);
@@ -137,11 +148,53 @@ const fetchText = async (
 ) => fetchUpstream(url, providerName, fetchImpl, timeoutMs, (response) => response.text());
 
 const toSafeErrorMessage = (error: unknown) => {
-  if (error instanceof Error && error.message.trim()) {
+  if (error instanceof ProviderError && error.message.trim()) {
     return error.message;
   }
 
   return 'Unknown upstream provider failure';
+};
+
+const readYouTubeErrorReasons = (payload: unknown) => {
+  if (!isObjectRecord(payload) || !isObjectRecord(payload.error) || !Array.isArray(payload.error.errors)) {
+    return [];
+  }
+
+  return payload.error.errors
+    .map((entry) => (isObjectRecord(entry) && typeof entry.reason === 'string' ? entry.reason.trim() : ''))
+    .filter((reason) => reason.length > 0);
+};
+
+const classifyYouTubeApiFailure = (status: number, payload: unknown): ProviderFailureReason => {
+  const reasons = readYouTubeErrorReasons(payload).map((reason) => reason.toLowerCase());
+  const isInvalidCredentialReason = reasons.some((reason) =>
+    ['keyinvalid', 'ipreferernotallowed', 'forbidden', 'autherror'].includes(reason)
+  );
+  if (isInvalidCredentialReason || status === 401) {
+    return 'invalid_credentials';
+  }
+
+  const isQuotaReason = reasons.some((reason) =>
+    ['quotaexceeded', 'dailylimitexceeded', 'userratelimitexceeded', 'ratelimitexceeded'].includes(reason)
+  );
+  if (isQuotaReason || status === 403 || status === 429) {
+    return 'quota_exceeded';
+  }
+
+  return 'failure';
+};
+
+const createDiscoveryFailure = (status: number, payload: unknown) => {
+  const reason = classifyYouTubeApiFailure(status, payload);
+  if (reason === 'invalid_credentials') {
+    return new ProviderError('youtube-data-api', reason, 'Invalid YouTube Data API credentials');
+  }
+
+  if (reason === 'quota_exceeded') {
+    return new ProviderError('youtube-data-api', reason, 'YouTube Data API quota or rate limit exceeded');
+  }
+
+  return new ProviderError('youtube-data-api', reason, 'YouTube Data API request failed');
 };
 
 class MockDiscoveryProvider implements DiscoveryProvider {
@@ -191,9 +244,49 @@ export class YouTubeDataDiscoveryProvider implements DiscoveryProvider {
     private readonly fetchImpl: typeof fetch = fetch
   ) {}
 
+  private async fetchDiscoveryJson<TResponse>(url: string) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), APP_CONFIG.transcript.providerTimeoutMs);
+
+    try {
+      const response = await this.fetchImpl(url, {
+        headers: { accept: 'application/json' },
+        signal: controller.signal
+      });
+
+      if (!response.ok) {
+        let errorPayload: unknown = null;
+        try {
+          errorPayload = await response.json();
+        } catch {
+          errorPayload = null;
+        }
+        throw createDiscoveryFailure(response.status, errorPayload);
+      }
+
+      try {
+        return (await response.json()) as TResponse;
+      } catch {
+        throw new ProviderError(this.providerName, 'malformed_payload', 'Malformed YouTube Data API payload');
+      }
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new ProviderError(this.providerName, 'timeout', 'Upstream provider request timed out');
+      }
+
+      if (error instanceof ProviderError) {
+        throw error;
+      }
+
+      throw new ProviderError(this.providerName, 'failure', 'YouTube Data API request failed');
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   async discover(keywords: string) {
     if (!this.apiKey) {
-      throw new ProviderError(this.providerName, 'failure', 'Missing YouTube Data API configuration');
+      throw new ProviderError(this.providerName, 'missing_config', 'Missing YouTube Data API configuration');
     }
 
     const maxResults = APP_CONFIG.jobCaps.maxVideosPerJob;
@@ -208,7 +301,10 @@ export class YouTubeDataDiscoveryProvider implements DiscoveryProvider {
       'items(id/videoId,snippet/title,snippet/channelTitle,snippet/publishedAt)'
     );
 
-    const searchResponse = await fetchJson<YouTubeSearchResponse>(searchUrl.toString(), this.providerName, this.fetchImpl);
+    const searchResponse = await this.fetchDiscoveryJson<unknown>(searchUrl.toString());
+    if (!isSearchResponse(searchResponse)) {
+      throw new ProviderError(this.providerName, 'malformed_payload', 'Malformed YouTube Data API payload');
+    }
     const rankedItems = (searchResponse.items ?? [])
       .map((item, index) => ({
         sourceId: item.id?.videoId?.trim() || '',
@@ -229,7 +325,10 @@ export class YouTubeDataDiscoveryProvider implements DiscoveryProvider {
     detailsUrl.searchParams.set('id', rankedItems.map((item) => item.sourceId).join(','));
     detailsUrl.searchParams.set('fields', 'items(id,contentDetails/duration)');
 
-    const detailResponse = await fetchJson<YouTubeVideosResponse>(detailsUrl.toString(), this.providerName, this.fetchImpl);
+    const detailResponse = await this.fetchDiscoveryJson<unknown>(detailsUrl.toString());
+    if (!isVideosResponse(detailResponse)) {
+      throw new ProviderError(this.providerName, 'malformed_payload', 'Malformed YouTube Data API payload');
+    }
     const durationById = new Map(
       (detailResponse.items ?? [])
         .filter((item): item is Required<Pick<NonNullable<YouTubeVideosResponse['items']>[number], 'id' | 'contentDetails'>> => {
@@ -452,40 +551,41 @@ export class YouTubeCaptionsTranscriptProvider implements TranscriptProvider {
   }
 }
 
-class FallbackDiscoveryProvider implements DiscoveryProvider {
+class StrictDiscoveryProvider implements DiscoveryProvider {
   readonly providerName: string;
 
   constructor(
     private readonly primary: DiscoveryProvider,
-    private readonly fallback: DiscoveryProvider,
-    private readonly logger: StructuredLogger
+    private readonly logger: StructuredLogger,
+    private readonly blockedFallbackProvider = 'mock'
   ) {
-    this.providerName = `${this.primary.providerName}-fallback-${this.fallback.providerName}`;
+    this.providerName = this.primary.providerName;
   }
 
   async discover(keywords: string) {
     try {
       const videos = await this.primary.discover(keywords);
-      if (videos.length > 0) {
-        return videos;
+      if (videos.length === 0) {
+        this.logger.warn('provider_fallback_blocked', {
+          stage: 'discovery',
+          provider: this.primary.providerName,
+          fallbackProvider: this.blockedFallbackProvider,
+          reason: 'empty_result',
+          outcome: 'degraded'
+        });
       }
-      this.logger.warn('provider_fallback', {
-        stage: 'discovery',
-        provider: this.primary.providerName,
-        fallbackProvider: this.fallback.providerName,
-        reason: 'empty_result'
-      });
+      return videos;
     } catch (error) {
-      this.logger.warn('provider_fallback', {
+      this.logger.warn('provider_fallback_blocked', {
         stage: 'discovery',
         provider: this.primary.providerName,
-        fallbackProvider: this.fallback.providerName,
+        fallbackProvider: this.blockedFallbackProvider,
         reason: error instanceof ProviderError ? error.reason : 'failure',
-        detail: toSafeErrorMessage(error)
+        detail: toSafeErrorMessage(error),
+        outcome: 'failed'
       });
+      throw error;
     }
-
-    return this.fallback.discover(keywords);
   }
 }
 
@@ -493,13 +593,14 @@ export const createMockDiscoveryProvider = () => new MockDiscoveryProvider();
 
 export const createMockTranscriptProvider = () => new MockTranscriptProvider();
 
+export const createStrictDiscoveryProvider = (
+  primary: DiscoveryProvider,
+  logger: StructuredLogger = createStructuredLogger()
+) => new StrictDiscoveryProvider(primary, logger);
+
 export const createConfiguredDiscoveryProvider = (logger: StructuredLogger = createStructuredLogger()) => {
   if (RUNTIME_CONFIG.discoveryProvider === 'youtube-data-api') {
-    return new FallbackDiscoveryProvider(
-      new YouTubeDataDiscoveryProvider(RUNTIME_CONFIG.youtubeDataApiKey),
-      createMockDiscoveryProvider(),
-      logger
-    );
+    return createStrictDiscoveryProvider(new YouTubeDataDiscoveryProvider(RUNTIME_CONFIG.youtubeDataApiKey), logger);
   }
 
   return createMockDiscoveryProvider();

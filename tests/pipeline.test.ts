@@ -12,6 +12,7 @@ import {
   YouTubeCaptionsTranscriptProvider,
   YouTubeDataDiscoveryProvider,
   createMockDiscoveryProvider,
+  createStrictDiscoveryProvider,
   createMockTranscriptProvider,
   type TranscriptProvider
 } from '../src/providers.js';
@@ -150,6 +151,92 @@ test('real YouTube discovery provider maps API payloads into stable candidate vi
       embedUrl: 'https://www.youtube.com/embed/video-a'
     }
   ]);
+});
+
+test('real YouTube discovery provider fails closed for missing key, invalid key, quota, timeout, and malformed payloads', async () => {
+  await assert.rejects(
+    () => new YouTubeDataDiscoveryProvider('').discover('budget hack'),
+    (error: unknown) =>
+      error instanceof ProviderError &&
+      error.providerName === 'youtube-data-api' &&
+      error.reason === 'missing_config' &&
+      error.message === 'Missing YouTube Data API configuration'
+  );
+
+  await assert.rejects(
+    () =>
+      new YouTubeDataDiscoveryProvider('test-key', async () =>
+        ({
+          ok: false,
+          status: 400,
+          async json() {
+            return { error: { errors: [{ reason: 'keyInvalid' }] } };
+          }
+        }) as Response
+      ).discover('budget hack'),
+    (error: unknown) =>
+      error instanceof ProviderError &&
+      error.providerName === 'youtube-data-api' &&
+      error.reason === 'invalid_credentials' &&
+      error.message === 'Invalid YouTube Data API credentials'
+  );
+
+  for (const status of [403, 429]) {
+    await assert.rejects(
+      () =>
+        new YouTubeDataDiscoveryProvider('test-key', async () =>
+          ({
+            ok: false,
+            status,
+            async json() {
+              return { error: { errors: [{ reason: status === 403 ? 'quotaExceeded' : 'rateLimitExceeded' }] } };
+            }
+          }) as Response
+        ).discover('budget hack'),
+      (error: unknown) =>
+        error instanceof ProviderError &&
+        error.providerName === 'youtube-data-api' &&
+        error.reason === 'quota_exceeded' &&
+        error.message === 'YouTube Data API quota or rate limit exceeded'
+    );
+  }
+
+  await assert.rejects(
+    () =>
+      new YouTubeDataDiscoveryProvider(
+        'test-key',
+        async (_input: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              const aborted = new Error('Request aborted');
+              aborted.name = 'AbortError';
+              reject(aborted);
+            });
+          })
+      ).discover('budget hack'),
+    (error: unknown) =>
+      error instanceof ProviderError &&
+      error.providerName === 'youtube-data-api' &&
+      error.reason === 'timeout' &&
+      error.message === 'Upstream provider request timed out'
+  );
+
+  await assert.rejects(
+    () =>
+      new YouTubeDataDiscoveryProvider('test-key', async () =>
+        ({
+          ok: true,
+          async json() {
+            return { items: 'not-an-array' };
+          }
+        }) as Response
+      ).discover('budget hack'),
+    (error: unknown) =>
+      error instanceof ProviderError &&
+      error.providerName === 'youtube-data-api' &&
+      error.reason === 'malformed_payload' &&
+      error.message === 'Malformed YouTube Data API payload'
+  );
 });
 
 test('real YouTube transcript provider maps caption payloads into normalized transcript segments', async () => {
@@ -451,6 +538,107 @@ test('transcript timeout failures map to explicit degraded behavior', async () =
         entry.event === 'provider_degraded' &&
         entry.jobId === created.jobId &&
         entry.reason === 'no_transcripts_available'
+    )
+  );
+});
+
+test('strict discovery mode never substitutes mock results on empty real discovery output', async () => {
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = createStructuredLogger((entry) => logs.push(entry));
+  let transcriptCalls = 0;
+
+  const transcriptProvider: TranscriptProvider = {
+    providerName: 'counting-transcript',
+    getCacheKey(targetVideo, language) {
+      return `yt:${targetVideo.sourceId}:${language}:counting`;
+    },
+    async getTranscript() {
+      transcriptCalls += 1;
+      return null;
+    }
+  };
+
+  const pipeline = createPipeline({
+    discoveryProvider: createStrictDiscoveryProvider(
+      {
+        providerName: 'youtube-data-api',
+        discover: async () => []
+      },
+      logger
+    ),
+    transcriptProvider,
+    logger
+  });
+  const jobs = new JobStore({ pipeline, logger });
+
+  const created = jobs.createJob('budget hack');
+  const job = await waitForJobTerminalState(jobs, created.jobId);
+
+  assert.equal(job.status, 'degraded');
+  assert.equal(job.stage, 'done');
+  assert.equal(job.clips.length, 0);
+  assert.equal(transcriptCalls, 0);
+  assert.ok(
+    logs.some(
+      (entry) =>
+        entry.event === 'provider_fallback_blocked' &&
+        entry.jobId === undefined &&
+        entry.stage === 'discovery' &&
+        entry.provider === 'youtube-data-api' &&
+        entry.fallbackProvider === 'mock' &&
+        entry.reason === 'empty_result' &&
+        entry.outcome === 'degraded'
+    )
+  );
+  assert.ok(
+    logs.some(
+      (entry) =>
+        entry.event === 'provider_degraded' &&
+        entry.jobId === created.jobId &&
+        entry.stage === 'discovery' &&
+        entry.provider === 'youtube-data-api' &&
+        entry.reason === 'empty_result' &&
+        entry.outcome === 'degraded'
+    )
+  );
+});
+
+test('strict discovery mode surfaces missing real discovery configuration without mock fallback', async () => {
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = createStructuredLogger((entry) => logs.push(entry));
+  const pipeline = createPipeline({
+    discoveryProvider: createStrictDiscoveryProvider(new YouTubeDataDiscoveryProvider(''), logger),
+    transcriptProvider: createMockTranscriptProvider(),
+    logger
+  });
+  const jobs = new JobStore({ pipeline, logger });
+
+  const created = jobs.createJob('budget hack');
+  const job = await waitForJobTerminalState(jobs, created.jobId);
+
+  assert.equal(job.status, 'failed');
+  assert.equal(job.stage, 'done');
+  assert.equal(job.clips.length, 0);
+  assert.ok(
+    logs.some(
+      (entry) =>
+        entry.event === 'provider_fallback_blocked' &&
+        entry.stage === 'discovery' &&
+        entry.provider === 'youtube-data-api' &&
+        entry.fallbackProvider === 'mock' &&
+        entry.reason === 'missing_config' &&
+        entry.outcome === 'failed'
+    )
+  );
+  assert.ok(
+    logs.some(
+      (entry) =>
+        entry.event === 'provider_failure' &&
+        entry.jobId === created.jobId &&
+        entry.stage === 'discovery' &&
+        entry.provider === 'youtube-data-api' &&
+        entry.reason === 'missing_config' &&
+        entry.outcome === 'failed'
     )
   );
 });
