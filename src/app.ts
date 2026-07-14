@@ -7,7 +7,7 @@ import { JobStore } from './jobs.js';
 import { createStructuredLogger, hashForLog, type StructuredLogger } from './logging.js';
 import { checkSearchRateLimit } from './rateLimit.js';
 import { getRequestIp, validateAnonymousToken } from './requestSecurity.js';
-import { validateKeywords } from './utils.js';
+import { hashValue, validateKeywords } from './utils.js';
 
 interface JobStoreLike {
   createJob(keywords: string): { jobId: string };
@@ -24,6 +24,7 @@ interface AppOptions {
 export const createApp = (clientDir: string, jobs?: JobStoreLike, options: AppOptions = {}) => {
   const logger = options.logger ?? createStructuredLogger();
   const jobStore = jobs ?? new JobStore({ logger });
+  const jobOwnerHashes = new Map<string, string>();
   const app = express();
   const trustProxyHeaders = options.trustProxyHeaders ?? RUNTIME_CONFIG.trustProxyHeaders;
 
@@ -31,6 +32,60 @@ export const createApp = (clientDir: string, jobs?: JobStoreLike, options: AppOp
   app.set('trust proxy', trustProxyHeaders);
   app.use(express.json({ limit: '16kb' }));
   app.use(express.static(clientDir));
+
+  const requireOwnedJobToken = (
+    route: '/jobs/:jobId' | '/jobs/:jobId/clips',
+    request: express.Request,
+    response: express.Response
+  ) => {
+    const requestId = randomUUID();
+    const ip = getRequestIp(request, trustProxyHeaders);
+    const rawToken = request.header('x-anon-token');
+    const tokenValidation = validateAnonymousToken(rawToken);
+    const baseLogFields = {
+      requestId,
+      route,
+      jobId: request.params.jobId,
+      ipHash: hashForLog(ip)
+    };
+
+    if (!tokenValidation.ok) {
+      logger.warn('job_access_rejected', {
+        ...baseLogFields,
+        reason: `${tokenValidation.reason}_anon_token`,
+        tokenState: tokenValidation.reason,
+        statusCode: 401
+      });
+      response.status(401).json({ error: 'valid anonymous token required' });
+      return null;
+    }
+
+    const ownerTokenHash = jobOwnerHashes.get(request.params.jobId);
+    const tokenHash = hashForLog(tokenValidation.token);
+    if (!ownerTokenHash) {
+      logger.warn('job_access_rejected', {
+        ...baseLogFields,
+        reason: 'missing_owner_binding',
+        tokenHash,
+        statusCode: 404
+      });
+      response.status(404).json({ error: 'job not found' });
+      return null;
+    }
+
+    if (ownerTokenHash !== hashValue(tokenValidation.token)) {
+      logger.warn('job_access_rejected', {
+        ...baseLogFields,
+        reason: 'token_mismatch',
+        tokenHash,
+        statusCode: 404
+      });
+      response.status(404).json({ error: 'job not found' });
+      return null;
+    }
+
+    return tokenValidation.token;
+  };
 
   app.post('/search', (request, response) => {
     const requestId = randomUUID();
@@ -88,6 +143,7 @@ export const createApp = (clientDir: string, jobs?: JobStoreLike, options: AppOp
     }
 
     const job = jobStore.createJob(request.body.keywords);
+    jobOwnerHashes.set(job.jobId, hashValue(tokenValidation.token));
     logger.info('search_accepted', {
       ...baseLogFields,
       jobId: job.jobId,
@@ -99,6 +155,10 @@ export const createApp = (clientDir: string, jobs?: JobStoreLike, options: AppOp
   });
 
   app.get('/jobs/:jobId', (request, response) => {
+    if (!requireOwnedJobToken('/jobs/:jobId', request, response)) {
+      return;
+    }
+
     const job = jobStore.getJob(request.params.jobId);
     if (!job) {
       response.status(404).json({ error: 'job not found' });
@@ -115,6 +175,10 @@ export const createApp = (clientDir: string, jobs?: JobStoreLike, options: AppOp
   });
 
   app.get('/jobs/:jobId/clips', (request, response) => {
+    if (!requireOwnedJobToken('/jobs/:jobId/clips', request, response)) {
+      return;
+    }
+
     const clips = jobStore.getClips(request.params.jobId);
     if (clips === null) {
       response.status(404).json({ error: 'job not found' });

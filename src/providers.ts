@@ -1,4 +1,4 @@
-import { APP_CONFIG, RUNTIME_CONFIG } from './config.js';
+import { APP_CONFIG, RUNTIME_CONFIG, type RuntimeConfig } from './config.js';
 import { type StructuredLogger, createStructuredLogger } from './logging.js';
 import { MOCK_VIDEO_LIBRARY } from './mockData.js';
 import { deriveRelevanceScore } from './relevance.js';
@@ -34,6 +34,13 @@ export class ProviderError extends Error {
   ) {
     super(message);
     this.name = 'ProviderError';
+  }
+}
+
+export class ProviderConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProviderConfigError';
   }
 }
 
@@ -598,16 +605,32 @@ export const createStrictDiscoveryProvider = (
   logger: StructuredLogger = createStructuredLogger()
 ) => new StrictDiscoveryProvider(primary, logger);
 
-export const createConfiguredDiscoveryProvider = (logger: StructuredLogger = createStructuredLogger()) => {
-  if (RUNTIME_CONFIG.discoveryProvider === 'youtube-data-api') {
-    return createStrictDiscoveryProvider(new YouTubeDataDiscoveryProvider(RUNTIME_CONFIG.youtubeDataApiKey), logger);
+export const createConfiguredDiscoveryProvider = (
+  logger: StructuredLogger = createStructuredLogger(),
+  runtimeConfig: RuntimeConfig = RUNTIME_CONFIG
+) => {
+  const discoveryConfig = runtimeConfig;
+  const providerIssue = discoveryConfig.providerConfigIssues.find((issue) =>
+    ['DISCOVERY_PROVIDER', 'YOUTUBE_DATA_API_KEY'].includes(issue.field)
+  );
+  if (providerIssue) {
+    throw new ProviderConfigError(providerIssue.message);
+  }
+
+  if (discoveryConfig.discoveryProvider === 'youtube-data-api') {
+    return createStrictDiscoveryProvider(new YouTubeDataDiscoveryProvider(discoveryConfig.youtubeDataApiKey), logger);
   }
 
   return createMockDiscoveryProvider();
 };
 
-export const createConfiguredTranscriptProvider = () => {
-  if (RUNTIME_CONFIG.transcriptProvider === 'youtube-captions') {
+export const createConfiguredTranscriptProvider = (runtimeConfig: RuntimeConfig = RUNTIME_CONFIG) => {
+  const providerIssue = runtimeConfig.providerConfigIssues.find((issue) => issue.field === 'TRANSCRIPT_PROVIDER');
+  if (providerIssue) {
+    throw new ProviderConfigError(providerIssue.message);
+  }
+
+  if (runtimeConfig.transcriptProvider === 'youtube-captions') {
     return new YouTubeCaptionsTranscriptProvider();
   }
 

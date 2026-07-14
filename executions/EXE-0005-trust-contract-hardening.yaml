@@ -1,0 +1,146 @@
+metadata:
+  execution_id: EXE-0005
+  title: Trust and contract hardening before scoring ensemble
+  status: completed
+  owners:
+    - engineering
+    - qa_security
+    - orchestrator
+  directive_refs:
+    - DIR-0001
+  last_updated: 2026-07-13
+
+scope:
+  objective: Close the next high-priority trust gaps by failing closed on provider config, aligning the anonymous-token contract, and eliminating unsafe upstream metadata rendering before scoring-ensemble work begins.
+  in_scope:
+    - fail-closed provider configuration behavior for invalid or missing provider mode values and required secrets
+    - anonymous-token contract clarification and enforcement across relevant endpoints
+    - XSS-safe client rendering and URL handling for upstream metadata
+    - regression and abuse-case coverage for provider config, token behavior, and unsafe metadata payloads
+    - API or README contract updates needed to match implemented behavior
+  out_of_scope:
+    - scoring ensemble implementation
+    - cache strategy expansion
+    - rendered fallback pipeline
+    - UI redesign beyond safe rendering behavior
+    - full account-based authentication redesign
+
+handoff:
+  owners:
+    orchestrator: DOE Orchestrator
+    project_manager: DOE Project Manager
+    ux_ui: N/A
+    engineering: DOE Full Stack Delivery
+    qa_security: DOE QA Security
+    ci_enforcement: N/A
+  acceptance_criteria:
+    - Invalid or unknown DISCOVERY_PROVIDER and TRANSCRIPT_PROVIDER values do not silently default to mock behavior.
+    - Real-provider modes with missing required secrets fail closed at startup or reject requests explicitly and observably.
+    - Anonymous-token requirements are documented and enforced consistently for the intended protected routes.
+    - Raw tokens never appear in logs or client-visible error messages.
+    - Upstream metadata fields rendered in the browser are XSS-safe and unsafe URLs are blocked or sanitized.
+    - Build and automated regression coverage remain green with new tests for provider config, token behavior, and hostile metadata payloads.
+  risk_tier: high
+  risk_rationale: This slice addresses trust, authorization-contract, and browser injection issues that directly affect release safety and data provenance.
+  threat_or_abuse_assumptions:
+    - invalid provider config may otherwise broaden scope to mock data unexpectedly
+    - weak or drifting anonymous-token behavior may allow confused-deputy or cross-job access patterns
+    - hostile upstream metadata may attempt DOM or URL-based XSS in the browser
+  validation_plan:
+    engineering:
+      - npm run build
+      - npm test
+      - automated coverage for provider config failure, token enforcement, and hostile metadata rendering
+    qa_security:
+      - negative-path verification for invalid provider env values, missing secrets, token mismatch, and hostile metadata/URL payloads
+      - log-sanitization review for token and provider errors
+    ci_enforcement:
+      - N/A until CI expansion is requested
+  release_gates:
+    - provider config fails closed with no silent mock substitution
+    - anonymous-token contract is documented and enforced consistently
+    - hostile upstream metadata cannot inject HTML or unsafe URLs into the client
+    - API contracts remain coherent and documented
+    - scoring work does not begin until this trust slice is green
+  rollback_expectation:
+    - revert hardening changes in one deploy if client compatibility regresses, without widening production discovery scope or changing API schemas
+
+quality_gates:
+  definition_of_ready:
+    project_manager: pass
+    ux_ui: n/a
+    qa_security: pass
+    ci_enforcement: n/a
+    notes:
+      - This slice is explicitly prioritized ahead of the scoring-ensemble work.
+      - Scope is limited to trust, contract, and safe-rendering concerns.
+  definition_of_done:
+    engineering: pass
+    qa_security: pass
+    ci_enforcement: n/a
+    orchestrator: pass
+    notes:
+      - Engineering implemented fail-closed provider config handling, anonymous-token route protection, safe client rendering, contract updates, and regression coverage.
+      - QA/security verified the slice with build passing and 24 of 24 tests passing, including provider config failure, token mismatch, and hostile metadata rendering scenarios.
+
+backlog:
+  items:
+    - SLICE-8-trust-contract-hardening
+    - mvp-trust-contract-hardening
+  dependencies:
+    - EXE-0001 through EXE-0004 completed on branch 2026/feat/mvp-foundation-app
+
+implementation:
+  systems_touched:
+    - runtime config
+    - request security
+    - api contract documentation
+    - client rendering
+    - tests
+    - logging
+  approach:
+    - harden provider config parsing and runtime behavior to fail closed
+    - align anonymous-token requirements across routes and documentation
+    - replace unsafe rendering patterns with DOM-safe text and URL handling
+    - add abuse-case regression coverage for config, token, and metadata injection paths
+  preview:
+    run_command: npm run dev
+    verification: Valid flows still work, invalid provider config fails explicitly, token behavior is consistent, and hostile metadata renders harmlessly.
+  deployment:
+    free_host_provider: Vercel
+    steps:
+      - configure provider env vars and token-related runtime expectations in the host dashboard
+      - run npm run build during deployment
+      - verify protected route behavior and safe client rendering after deploy
+  rollback:
+    - revert this slice without changing the API response schemas or discovery/transcript provider data models
+
+validation:
+  engineering_checks:
+    - build
+    - provider config regression tests
+    - token enforcement regression tests
+    - hostile metadata rendering tests
+  qa_checks:
+    - invalid provider env and missing secret scenarios
+    - token mismatch and cross-job access scenarios
+    - hostile title, channel, and URL payload rendering scenarios
+  security_checks:
+    - no raw token or secret leakage in logs
+    - no XSS execution path from upstream metadata
+    - fail-closed behavior proven for provider config
+  evidence:
+    - npm run build -> pass
+    - npm test -> pass (24/24 tests)
+    - invalid or unknown provider modes and missing YOUTUBE_DATA_API_KEY fail closed with ProviderConfigError
+    - x-anon-token UUID contract is documented and enforced on /search, /jobs/{jobId}, and /jobs/{jobId}/clips
+    - token mismatch returns 404 job not found and raw tokens are not logged
+    - client rendering uses DOM-safe text handling and URL allowlisting for rendered and YouTube clip URLs
+    - hostile metadata and unsafe URL payload regression tests remained green
+
+risk:
+  residual_risks:
+    - anonymous-token model remains lighter-weight than full issued-credential auth
+    - browser and hosting differences may still warrant live smoke testing for rendering behavior
+    - production-scale rate limiting remains in-memory until a later slice
+  release_recommendation: go

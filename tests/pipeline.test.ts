@@ -3,14 +3,18 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { resolve } from 'node:path';
 import { createApp } from '../src/app.js';
-import { APP_CONFIG } from '../src/config.js';
+import { APP_CONFIG, readRuntimeConfig } from '../src/config.js';
+import { buildClipRenderModel, resolveSafeClipHref } from '../src/client/render.js';
 import { JobStore } from '../src/jobs.js';
 import { createStructuredLogger } from '../src/logging.js';
 import { createMockPipeline, createPipeline } from '../src/pipeline.js';
 import {
+  ProviderConfigError,
   ProviderError,
   YouTubeCaptionsTranscriptProvider,
   YouTubeDataDiscoveryProvider,
+  createConfiguredDiscoveryProvider,
+  createConfiguredTranscriptProvider,
   createMockDiscoveryProvider,
   createStrictDiscoveryProvider,
   createMockTranscriptProvider,
@@ -995,5 +999,222 @@ test('jobs explicitly degrade when the transcript provider cannot serve youtube-
         entry.jobId === created.jobId &&
         entry.reason === 'no_transcripts_available'
     )
+  );
+});
+
+test('configured providers fail closed for invalid or missing provider modes', () => {
+  const invalidDiscoveryConfig = readRuntimeConfig({
+    DISCOVERY_PROVIDER: 'surprise-mode',
+    TRANSCRIPT_PROVIDER: 'mock'
+  });
+  const missingTranscriptConfig = readRuntimeConfig({
+    DISCOVERY_PROVIDER: 'mock'
+  });
+
+  assert.equal(invalidDiscoveryConfig.hasProviderConfigIssues, true);
+  assert.throws(
+    () => createConfiguredDiscoveryProvider(silentLogger, invalidDiscoveryConfig),
+    (error) => error instanceof ProviderConfigError && /DISCOVERY_PROVIDER/.test(error.message)
+  );
+  assert.throws(
+    () => createConfiguredTranscriptProvider(missingTranscriptConfig),
+    (error) => error instanceof ProviderConfigError && /TRANSCRIPT_PROVIDER/.test(error.message)
+  );
+});
+
+test('configured discovery provider rejects real mode without the required secret', () => {
+  const missingSecretConfig = readRuntimeConfig({
+    DISCOVERY_PROVIDER: 'youtube-data-api',
+    TRANSCRIPT_PROVIDER: 'mock',
+    YOUTUBE_DATA_API_KEY: '   '
+  });
+
+  assert.throws(
+    () => createConfiguredDiscoveryProvider(silentLogger, missingSecretConfig),
+    (error) => error instanceof ProviderConfigError && /YOUTUBE_DATA_API_KEY/.test(error.message)
+  );
+});
+
+test('job status and clip routes require the creating anonymous token and hide cross-job access', async () => {
+  resetSearchRateLimits();
+
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = createStructuredLogger((entry) => logs.push(entry));
+  let jobCount = 0;
+  const jobsById = new Map<
+    string,
+    {
+      jobId: string;
+      keywords: string;
+      status: 'completed';
+      stage: 'done';
+      progressPct: 100;
+      clipsReadyCount: number;
+      clips: Array<{
+        clipId: string;
+        jobId: string;
+        mode: 'timestamp';
+        platform: 'youtube';
+        videoId: string;
+        startTimeSec: number;
+        endTimeSec: number;
+        viralScore: number;
+        channelName: string;
+        title: string;
+        dominantEmotion: string;
+      }>;
+      createdAt: number;
+    }
+  >();
+  const jobs = {
+    createJob() {
+      jobCount += 1;
+      const jobId = `job-${jobCount}`;
+      const clips = [
+        {
+          clipId: `clip-${jobCount}`,
+          jobId,
+          mode: 'timestamp' as const,
+          platform: 'youtube' as const,
+          videoId: `video-${jobCount}`,
+          startTimeSec: 5,
+          endTimeSec: 25,
+          viralScore: 0.75,
+          channelName: `channel ${jobCount}`,
+          title: `clip ${jobCount}`,
+          dominantEmotion: 'surprise'
+        }
+      ];
+      jobsById.set(jobId, {
+        jobId,
+        keywords: 'budget hack',
+        status: 'completed',
+        stage: 'done',
+        progressPct: 100,
+        clipsReadyCount: clips.length,
+        clips,
+        createdAt: Date.now()
+      });
+      return { jobId };
+    },
+    getJob(jobId: string) {
+      return jobsById.get(jobId) ?? null;
+    },
+    getClips(jobId: string) {
+      return jobsById.get(jobId)?.clips ?? null;
+    },
+    findClip: () => null
+  };
+  const server = await startAppServer(createApp(clientDir, jobs, { logger }));
+  const tokenA = '123e4567-e89b-42d3-a456-426614174111';
+  const tokenB = '123e4567-e89b-42d3-a456-426614174222';
+
+  try {
+    const createJob = async (token: string) => {
+      const response = await fetch(`${server.baseUrl}/search`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-anon-token': token
+        },
+        body: JSON.stringify({ keywords: 'budget hack' })
+      });
+      assert.equal(response.status, 202);
+      return response.json() as Promise<{ jobId: string }>;
+    };
+
+    const { jobId: jobIdA } = await createJob(tokenA);
+    const { jobId: jobIdB } = await createJob(tokenB);
+
+    const ownJobResponse = await fetch(`${server.baseUrl}/jobs/${jobIdA}`, {
+      headers: { 'x-anon-token': tokenA }
+    });
+    const crossJobResponse = await fetch(`${server.baseUrl}/jobs/${jobIdA}`, {
+      headers: { 'x-anon-token': tokenB }
+    });
+    const missingTokenResponse = await fetch(`${server.baseUrl}/jobs/${jobIdA}`);
+    const ownClipsResponse = await fetch(`${server.baseUrl}/jobs/${jobIdB}/clips`, {
+      headers: { 'x-anon-token': tokenB }
+    });
+    const crossClipsResponse = await fetch(`${server.baseUrl}/jobs/${jobIdB}/clips`, {
+      headers: { 'x-anon-token': tokenA }
+    });
+
+    assert.equal(ownJobResponse.status, 200);
+    assert.equal(crossJobResponse.status, 404);
+    assert.equal(missingTokenResponse.status, 401);
+    assert.equal(ownClipsResponse.status, 200);
+    assert.equal(crossClipsResponse.status, 404);
+
+    assert.deepEqual(await crossJobResponse.json(), { error: 'job not found' });
+    assert.deepEqual(await crossClipsResponse.json(), { error: 'job not found' });
+    assert.ok(
+      logs.some(
+        (entry) =>
+          entry.event === 'job_access_rejected' &&
+          entry.reason === 'token_mismatch' &&
+          typeof entry.tokenHash === 'string'
+      )
+    );
+    assert.equal(JSON.stringify(logs).includes(tokenA), false);
+    assert.equal(JSON.stringify(logs).includes(tokenB), false);
+  } finally {
+    await server.close();
+  }
+});
+
+test('client render model preserves hostile metadata as text and blocks unsafe URLs', () => {
+  const hostileTitle = '<img src=x onerror=alert(1)>';
+  const hostileChannel = '<script>alert(1)</script>';
+  const hostileEmotion = '<b>surprise</b>';
+  const model = buildClipRenderModel(
+    {
+      clipFileUrl: 'https://evil.example/clip',
+      playUrl: 'javascript:alert(1)',
+      title: hostileTitle,
+      channelName: hostileChannel,
+      mode: 'timestamp',
+      viralScore: 0.42,
+      startTimeSec: 12,
+      endTimeSec: 34,
+      dominantEmotion: hostileEmotion
+    },
+    'https://app.example'
+  );
+
+  assert.equal(model.title, hostileTitle);
+  assert.equal(model.channelName, hostileChannel);
+  assert.equal(model.emotionLabel, `Emotion: ${hostileEmotion}`);
+  assert.equal(model.href, null);
+});
+
+test('client render model allowlists rendered and YouTube clip URLs only', () => {
+  assert.equal(
+    resolveSafeClipHref(
+      {
+        clipFileUrl: '/rendered/job-1/clip-1',
+        playUrl: 'https://www.youtube.com/watch?v=abc123'
+      },
+      'https://app.example'
+    ),
+    '/rendered/job-1/clip-1'
+  );
+  assert.equal(
+    resolveSafeClipHref(
+      {
+        playUrl: 'https://www.youtube.com/watch?v=abc123'
+      },
+      'https://app.example'
+    ),
+    'https://www.youtube.com/watch?v=abc123'
+  );
+  assert.equal(
+    resolveSafeClipHref(
+      {
+        playUrl: 'https://example.com/watch?v=abc123'
+      },
+      'https://app.example'
+    ),
+    null
   );
 });

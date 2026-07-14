@@ -1,4 +1,5 @@
 import './styles.css';
+import { buildClipRenderModel } from './render.js';
 
 interface JobResponse {
   jobId: string;
@@ -45,31 +46,43 @@ const setMessage = (text: string) => {
   }
 };
 
-const formatSeconds = (value: number) => {
-  const total = Math.max(0, Math.floor(value));
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-};
-
 const renderClip = (clip: ClipCard) => {
   if (!clipList) {
     return;
   }
 
+  const model = buildClipRenderModel(clip, window.location.origin);
   const card = document.createElement('article');
   card.className = 'clip-card';
-  card.innerHTML = `
-    <h2>${clip.title}</h2>
-    <p class="meta">${clip.channelName}</p>
-    <div class="pill-row">
-      <span class="pill">Mode: ${clip.mode}</span>
-      <span class="pill">Score: ${clip.viralScore.toFixed(6)}</span>
-      <span class="pill">Emotion: ${clip.dominantEmotion}</span>
-      <span class="pill">Window: ${formatSeconds(clip.startTimeSec)} - ${formatSeconds(clip.endTimeSec)}</span>
-    </div>
-    <p><a href="${clip.clipFileUrl ?? clip.playUrl ?? '#'}" target="_blank" rel="noreferrer">Play clip</a></p>
-  `;
+  const title = document.createElement('h2');
+  title.textContent = model.title;
+
+  const channel = document.createElement('p');
+  channel.className = 'meta';
+  channel.textContent = model.channelName;
+
+  const pillRow = document.createElement('div');
+  pillRow.className = 'pill-row';
+  for (const label of [model.modeLabel, model.scoreLabel, model.emotionLabel, model.windowLabel]) {
+    const pill = document.createElement('span');
+    pill.className = 'pill';
+    pill.textContent = label;
+    pillRow.append(pill);
+  }
+
+  const linkWrapper = document.createElement('p');
+  if (model.href) {
+    const link = document.createElement('a');
+    link.href = model.href;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = 'Play clip';
+    linkWrapper.append(link);
+  } else {
+    linkWrapper.textContent = 'Clip link unavailable.';
+  }
+
+  card.append(title, channel, pillRow, linkWrapper);
   clipList.append(card);
 };
 
@@ -91,8 +104,12 @@ const refreshStatus = (job: JobResponse) => {
 const pollJob = async (jobId: string, pollerId: number) => {
   while (currentJobId === jobId && pollerId === activePoller) {
     const [jobResponse, clipsResponse] = await Promise.all([
-      fetch(`/jobs/${jobId}`),
-      fetch(`/jobs/${jobId}/clips`)
+      fetch(`/jobs/${jobId}`, {
+        headers: { 'x-anon-token': anonToken }
+      }),
+      fetch(`/jobs/${jobId}/clips`, {
+        headers: { 'x-anon-token': anonToken }
+      })
     ]);
 
     if (!jobResponse.ok || !clipsResponse.ok) {
@@ -135,7 +152,7 @@ form?.addEventListener('submit', async (event) => {
   activePoller += 1;
   seenClips = new Set();
   if (clipList) {
-    clipList.innerHTML = '';
+    clipList.replaceChildren();
   }
   refreshStatus({ jobId: '—', stage: 'queued', progressPct: 0, clipsReadyCount: 0, status: 'queued' });
   setMessage('Submitting search...');

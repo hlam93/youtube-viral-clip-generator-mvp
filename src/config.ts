@@ -98,9 +98,46 @@ const readPositiveInteger = (value: string | undefined, fallback: number) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-const readProviderMode = <TMode extends string>(value: string | undefined, supported: readonly TMode[], fallback: TMode) => {
+export const DISCOVERY_PROVIDER_MODES = ['mock', 'youtube-data-api'] as const;
+export const TRANSCRIPT_PROVIDER_MODES = ['mock', 'youtube-captions'] as const;
+
+export type DiscoveryProviderMode = (typeof DISCOVERY_PROVIDER_MODES)[number];
+export type TranscriptProviderMode = (typeof TRANSCRIPT_PROVIDER_MODES)[number];
+export type RuntimeConfigField = 'DISCOVERY_PROVIDER' | 'TRANSCRIPT_PROVIDER' | 'YOUTUBE_DATA_API_KEY';
+
+export interface RuntimeConfigIssue {
+  field: RuntimeConfigField;
+  message: string;
+}
+
+const readProviderMode = <TMode extends string>(
+  value: string | undefined,
+  supported: readonly TMode[],
+  field: RuntimeConfigField
+): { mode: TMode | null; issue: RuntimeConfigIssue | null } => {
   const normalized = value?.trim().toLowerCase();
-  return normalized && supported.includes(normalized as TMode) ? (normalized as TMode) : fallback;
+
+  if (!normalized) {
+    return {
+      mode: null,
+      issue: {
+        field,
+        message: `${field} must be explicitly set to ${supported.join(' | ')}`
+      }
+    };
+  }
+
+  if (supported.includes(normalized as TMode)) {
+    return { mode: normalized as TMode, issue: null };
+  }
+
+  return {
+    mode: null,
+    issue: {
+      field,
+      message: `${field} must be one of ${supported.join(' | ')}`
+    }
+  };
 };
 
 const readBooleanFlag = (value: string | undefined) => {
@@ -108,10 +145,32 @@ const readBooleanFlag = (value: string | undefined) => {
   return normalized === '1' || normalized === 'true' || normalized === 'yes';
 };
 
-export const RUNTIME_CONFIG = {
-  discoveryProvider: readProviderMode(process.env.DISCOVERY_PROVIDER, ['mock', 'youtube-data-api'] as const, 'mock'),
-  transcriptProvider: readProviderMode(process.env.TRANSCRIPT_PROVIDER, ['mock', 'youtube-captions'] as const, 'mock'),
-  youtubeDataApiKey: process.env.YOUTUBE_DATA_API_KEY?.trim() || '',
-  transcriptCacheTtlMs: readPositiveInteger(process.env.TRANSCRIPT_CACHE_TTL_MS, APP_CONFIG.transcript.cacheTtlMs),
-  trustProxyHeaders: readBooleanFlag(process.env.TRUST_PROXY_HEADERS)
-} as const;
+export const readRuntimeConfig = (env: NodeJS.ProcessEnv = process.env) => {
+  const discoveryProvider = readProviderMode(env.DISCOVERY_PROVIDER, DISCOVERY_PROVIDER_MODES, 'DISCOVERY_PROVIDER');
+  const transcriptProvider = readProviderMode(env.TRANSCRIPT_PROVIDER, TRANSCRIPT_PROVIDER_MODES, 'TRANSCRIPT_PROVIDER');
+  const youtubeDataApiKey = env.YOUTUBE_DATA_API_KEY?.trim() || '';
+  const providerConfigIssues = [discoveryProvider.issue, transcriptProvider.issue].filter(
+    (issue): issue is RuntimeConfigIssue => Boolean(issue)
+  );
+
+  if (discoveryProvider.mode === 'youtube-data-api' && !youtubeDataApiKey) {
+    providerConfigIssues.push({
+      field: 'YOUTUBE_DATA_API_KEY',
+      message: 'YOUTUBE_DATA_API_KEY is required when DISCOVERY_PROVIDER=youtube-data-api'
+    });
+  }
+
+  return {
+    discoveryProvider: discoveryProvider.mode,
+    transcriptProvider: transcriptProvider.mode,
+    youtubeDataApiKey,
+    transcriptCacheTtlMs: readPositiveInteger(env.TRANSCRIPT_CACHE_TTL_MS, APP_CONFIG.transcript.cacheTtlMs),
+    trustProxyHeaders: readBooleanFlag(env.TRUST_PROXY_HEADERS),
+    providerConfigIssues,
+    hasProviderConfigIssues: providerConfigIssues.length > 0
+  } as const;
+};
+
+export type RuntimeConfig = ReturnType<typeof readRuntimeConfig>;
+
+export const RUNTIME_CONFIG = readRuntimeConfig();
