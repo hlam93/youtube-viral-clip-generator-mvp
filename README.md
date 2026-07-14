@@ -38,6 +38,7 @@ TRUST_PROXY_HEADERS=false
 - `TRUST_PROXY_HEADERS=true` should only be enabled behind a trusted reverse proxy; the default keeps IP guardrails bound to the direct socket address.
 - Real transcript mode requires outbound access to YouTube and may still degrade when captions are unavailable, blocked, or throttled upstream.
 - The Hume transport is live, but the current MVP still relies on the candidate window source URL contract already present in the app; if your deployment needs direct audio clip URLs instead of public YouTube window URLs, add that extractor/proxy in a later slice.
+- npm scripts do not auto-load a local `.env` file by default; runtime configuration must be provided by the host process environment (or an explicit dotenv loader added in a future slice).
 
 ## Anonymous-token contract
 

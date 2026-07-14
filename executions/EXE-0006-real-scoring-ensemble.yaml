@@ -89,6 +89,7 @@ backlog:
   items:
     - SLICE-9-real-deterministic-scoring-ensemble
     - mvp-scoring-ensemble-slice
+    - followup-env-runtime-loading-contract
   dependencies:
     - EXE-0001 through EXE-0005 completed on branch 2026/feat/mvp-foundation-app
     - approved transcript-emotion provider selection
@@ -149,4 +150,5 @@ risk:
     - live Hume compatibility was validated through provider-path tests rather than a live upstream smoke run
     - unchanged windowing may limit quality improvements until a later slice
     - in-memory cache behavior still differs from production-scale deployment
+    - npm scripts do not auto-load `.env`; local operators may assume `.env` is read unless runtime env injection or dotenv wiring is added in a follow-up slice
   release_recommendation: go-with-risk
