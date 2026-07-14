@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { APP_CONFIG } from './config.js';
-import { createPipeline } from './pipeline.js';
+import { type StructuredLogger, createStructuredLogger } from './logging.js';
+import { createPipeline, type ViralClipPipeline } from './pipeline.js';
 import type { ClipCard, JobStage, JobState, JobStatus } from './types.js';
 import { delay, normalizeKeywords } from './utils.js';
 
@@ -15,7 +16,13 @@ const stageStatus: Record<JobStage, JobStatus> = {
 
 export class JobStore {
   private readonly jobs = new Map<string, JobState>();
-  private readonly pipeline = createPipeline();
+  private readonly pipeline: ViralClipPipeline;
+  private readonly logger: StructuredLogger;
+
+  constructor(options: { pipeline?: ViralClipPipeline; logger?: StructuredLogger } = {}) {
+    this.logger = options.logger ?? createStructuredLogger();
+    this.pipeline = options.pipeline ?? createPipeline({ logger: this.logger });
+  }
 
   createJob(keywords: string) {
     const jobId = randomUUID();
@@ -60,7 +67,25 @@ export class JobStore {
 
       this.update(job, 'transcript');
       await delay(120);
-      const contexts = await this.pipeline.buildContexts(videos);
+      const contexts = await this.pipeline.buildContexts(videos, { jobId });
+      if (videos.length > 0 && contexts.length === 0) {
+        this.logger.warn('provider_degraded', {
+          jobId,
+          stage: 'transcript',
+          provider: this.pipeline.transcriptProviderName,
+          reason: 'no_transcripts_available',
+          videoCount: videos.length
+        });
+      } else if (contexts.length < videos.length) {
+        this.logger.warn('provider_degraded', {
+          jobId,
+          stage: 'transcript',
+          provider: this.pipeline.transcriptProviderName,
+          reason: 'partial_transcript_coverage',
+          requestedVideoCount: videos.length,
+          transcriptVideoCount: contexts.length
+        });
+      }
 
       this.update(job, 'scoring');
       await delay(120);
@@ -85,6 +110,13 @@ export class JobStore {
       job.stage = 'done';
       job.progressPct = APP_CONFIG.progressByStage.done;
       job.error = error instanceof Error ? error.message : 'Unknown job failure';
+      this.logger.error('job_failed', {
+        jobId,
+        stage: job.stage,
+        provider: this.pipeline.transcriptProviderName,
+        reason: 'unhandled_job_failure',
+        detail: job.error
+      });
     }
   }
 

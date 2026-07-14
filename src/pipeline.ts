@@ -1,10 +1,12 @@
 import { AsyncValueCache } from './cache.js';
 import { APP_CONFIG, RUNTIME_CONFIG, SCORING_CONFIG_HASH } from './config.js';
+import { type StructuredLogger, createStructuredLogger } from './logging.js';
 import {
   createConfiguredDiscoveryProvider,
   createConfiguredTranscriptProvider,
   createMockDiscoveryProvider,
   createMockTranscriptProvider,
+  ProviderError,
   type DiscoveryProvider,
   type TranscriptProvider
 } from './providers.js';
@@ -119,6 +121,7 @@ interface PipelineOptions {
   discoveryProvider?: DiscoveryProvider;
   transcriptProvider?: TranscriptProvider;
   transcriptCacheTtlMs?: number;
+  logger?: StructuredLogger;
 }
 
 export class ViralClipPipeline {
@@ -129,9 +132,18 @@ export class ViralClipPipeline {
   constructor(
     private readonly discoveryProvider: DiscoveryProvider,
     private readonly transcriptProvider: TranscriptProvider,
-    transcriptCacheTtlMs = RUNTIME_CONFIG.transcriptCacheTtlMs
+    transcriptCacheTtlMs = RUNTIME_CONFIG.transcriptCacheTtlMs,
+    private readonly logger: StructuredLogger = createStructuredLogger()
   ) {
     this.transcriptCache = new AsyncValueCache<TranscriptCacheEntry>(transcriptCacheTtlMs);
+  }
+
+  get discoveryProviderName() {
+    return this.discoveryProvider.providerName;
+  }
+
+  get transcriptProviderName() {
+    return this.transcriptProvider.providerName;
   }
 
   async discover(keywords: string) {
@@ -244,13 +256,32 @@ export class ViralClipPipeline {
     );
   }
 
-  async buildContexts(videos: CandidateVideoLite[]) {
+  async buildContexts(videos: CandidateVideoLite[], correlation: { jobId?: string } = {}) {
     const contexts = await Promise.all(
       videos.map(async (video) => {
         try {
           const transcript = await this.getTranscript(video);
-          return transcript ? { video, transcript } : null;
-        } catch {
+          if (!transcript) {
+            this.logger.warn('provider_failure', {
+              jobId: correlation.jobId,
+              stage: 'transcript',
+              provider: this.transcriptProvider.providerName,
+              videoId: video.sourceId,
+              reason: 'empty_result'
+            });
+            return null;
+          }
+
+          return { video, transcript };
+        } catch (error) {
+          this.logger.warn('provider_failure', {
+            jobId: correlation.jobId,
+            stage: 'transcript',
+            provider: this.transcriptProvider.providerName,
+            videoId: video.sourceId,
+            reason: error instanceof ProviderError ? error.reason : 'failure',
+            detail: error instanceof Error ? error.message : 'Unknown upstream provider failure'
+          });
           return null;
         }
       })
@@ -337,14 +368,16 @@ export class ViralClipPipeline {
 
 export const createPipeline = (options: PipelineOptions = {}) =>
   new ViralClipPipeline(
-    options.discoveryProvider ?? createConfiguredDiscoveryProvider(),
+    options.discoveryProvider ?? createConfiguredDiscoveryProvider(options.logger),
     options.transcriptProvider ?? createConfiguredTranscriptProvider(),
-    options.transcriptCacheTtlMs ?? RUNTIME_CONFIG.transcriptCacheTtlMs
+    options.transcriptCacheTtlMs ?? RUNTIME_CONFIG.transcriptCacheTtlMs,
+    options.logger ?? createStructuredLogger()
   );
 
 export const createMockPipeline = () =>
   new ViralClipPipeline(
     createMockDiscoveryProvider(),
     createMockTranscriptProvider(),
-    APP_CONFIG.transcript.cacheTtlMs
+    APP_CONFIG.transcript.cacheTtlMs,
+    createStructuredLogger()
   );

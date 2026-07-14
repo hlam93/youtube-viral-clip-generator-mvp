@@ -18,10 +18,12 @@ DISCOVERY_PROVIDER=mock|youtube-data-api
 TRANSCRIPT_PROVIDER=mock|youtube-captions
 YOUTUBE_DATA_API_KEY=your-server-only-key
 TRANSCRIPT_CACHE_TTL_MS=900000
+TRUST_PROXY_HEADERS=false
 ```
 
 - `DISCOVERY_PROVIDER=youtube-data-api` enables real YouTube discovery and falls back to the deterministic mock adapter if the upstream request fails or the key is unavailable.
-- `TRANSCRIPT_PROVIDER=youtube-captions` currently uses the new transcript-provider boundary with a safe mock fallback, so rollback to pure mock behavior is immediate by switching the mode back to `mock`.
+- `TRANSCRIPT_PROVIDER=youtube-captions` no longer falls back to mock transcripts. In this runtime it degrades explicitly with structured logs until a real caption retrieval implementation is wired in.
+- `TRUST_PROXY_HEADERS=true` should only be enabled behind a trusted reverse proxy; the default keeps IP guardrails bound to the direct socket address.
 
 ## Production-style local run
 

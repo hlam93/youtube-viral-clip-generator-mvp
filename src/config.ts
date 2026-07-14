@@ -99,9 +99,15 @@ const readProviderMode = <TMode extends string>(value: string | undefined, suppo
   return normalized && supported.includes(normalized as TMode) ? (normalized as TMode) : fallback;
 };
 
+const readBooleanFlag = (value: string | undefined) => {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes';
+};
+
 export const RUNTIME_CONFIG = {
   discoveryProvider: readProviderMode(process.env.DISCOVERY_PROVIDER, ['mock', 'youtube-data-api'] as const, 'mock'),
   transcriptProvider: readProviderMode(process.env.TRANSCRIPT_PROVIDER, ['mock', 'youtube-captions'] as const, 'mock'),
   youtubeDataApiKey: process.env.YOUTUBE_DATA_API_KEY?.trim() || '',
-  transcriptCacheTtlMs: readPositiveInteger(process.env.TRANSCRIPT_CACHE_TTL_MS, APP_CONFIG.transcript.cacheTtlMs)
+  transcriptCacheTtlMs: readPositiveInteger(process.env.TRANSCRIPT_CACHE_TTL_MS, APP_CONFIG.transcript.cacheTtlMs),
+  trustProxyHeaders: readBooleanFlag(process.env.TRUST_PROXY_HEADERS)
 } as const;

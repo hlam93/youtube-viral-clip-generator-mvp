@@ -1,14 +1,65 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import { resolve } from 'node:path';
+import { createApp } from '../src/app.js';
 import { APP_CONFIG } from '../src/config.js';
+import { JobStore } from '../src/jobs.js';
+import { createStructuredLogger } from '../src/logging.js';
 import { createMockPipeline, createPipeline } from '../src/pipeline.js';
 import {
+  ProviderError,
   YouTubeDataDiscoveryProvider,
   createMockDiscoveryProvider,
   createMockTranscriptProvider,
   type TranscriptProvider
 } from '../src/providers.js';
+import { checkSearchRateLimit, resetSearchRateLimits } from '../src/rateLimit.js';
 import type { CandidateVideoLite, TranscriptCacheEntry } from '../src/types.js';
+
+const clientDir = resolve(process.cwd(), 'dist', 'client');
+const silentLogger = createStructuredLogger(() => {});
+
+const startAppServer = async (app: ReturnType<typeof createApp>) => {
+  const server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    async close() {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
+      await new Promise<void>((resolveClose, rejectClose) => {
+        server.close((error) => {
+          if (error) {
+            rejectClose(error);
+            return;
+          }
+
+          resolveClose();
+        });
+      });
+    }
+  };
+};
+
+const waitForJobTerminalState = async (jobs: JobStore, jobId: string) => {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < 5_000) {
+    const job = jobs.getJob(jobId);
+    assert.ok(job);
+    if (job.status === 'completed' || job.status === 'degraded' || job.status === 'failed') {
+      return job;
+    }
+
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+
+  throw new Error(`Job ${jobId} did not reach a terminal state in time`);
+};
 
 test('deterministic ranking remains stable and respects caps', async () => {
   const pipeline = createMockPipeline();
@@ -168,7 +219,7 @@ test('transcript cache expires after TTL and reloads upstream data', async () =>
   assert.equal(upstreamCalls, 2);
 });
 
-test('pipeline preserves clip contract when transcript provider falls back to mock behavior', async () => {
+test('pipeline preserves clip contract with an injected transcript provider', async () => {
   const video: CandidateVideoLite = {
     platform: 'youtube',
     sourceId: 'yt-alpha001',
@@ -193,7 +244,7 @@ test('pipeline preserves clip contract when transcript provider falls back to mo
   };
 
   const pipeline = createPipeline({
-    discoveryProvider: { discover: async () => [video] },
+    discoveryProvider: { providerName: 'stub-discovery', discover: async () => [video] },
     transcriptProvider
   });
 
@@ -224,24 +275,261 @@ test('pipeline degrades safely when one transcript request fails', async () => {
   const transcriptProvider: TranscriptProvider = {
     providerName: 'partial-failure-transcript',
     getCacheKey(targetVideo, language) {
-    return `yt:${targetVideo.sourceId}:${language}:partial-failure`;
+      return `yt:${targetVideo.sourceId}:${language}:partial-failure`;
     },
     async getTranscript(targetVideo, language) {
-    if (targetVideo.sourceId === discovered[0]?.sourceId) {
-      throw new Error('synthetic upstream failure');
-    }
+      if (targetVideo.sourceId === discovered[0]?.sourceId) {
+        throw new Error('synthetic upstream failure');
+      }
 
-    return createMockTranscriptProvider().getTranscript(targetVideo, language);
+      return createMockTranscriptProvider().getTranscript(targetVideo, language);
     }
   };
 
   const pipeline = createPipeline({
     discoveryProvider: createMockDiscoveryProvider(),
-    transcriptProvider
+    transcriptProvider,
+    logger: silentLogger
   });
 
   const contexts = await pipeline.buildContexts(discovered.slice(0, 2));
 
   assert.equal(contexts.length, 1);
   assert.equal(contexts[0]?.video.sourceId, discovered[1]?.sourceId);
+});
+
+test('search rejects missing, blank, and malformed anonymous tokens before job creation', async () => {
+  resetSearchRateLimits();
+
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = createStructuredLogger((entry) => logs.push(entry));
+  let createJobCalls = 0;
+  const jobs = {
+    createJob() {
+      createJobCalls += 1;
+      return { jobId: 'job-rejected' };
+    },
+    getJob: () => null,
+    getClips: () => null,
+    findClip: () => null
+  };
+
+  const server = await startAppServer(createApp(clientDir, jobs, { logger }));
+
+  try {
+    const missingTokenResponse = await fetch(`${server.baseUrl}/search`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ keywords: 'budget hack' })
+    });
+    const blankTokenResponse = await fetch(`${server.baseUrl}/search`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-anon-token': '   '
+      },
+      body: JSON.stringify({ keywords: 'budget hack' })
+    });
+    const invalidTokenValue = 'not-a-valid-token';
+    const invalidTokenResponse = await fetch(`${server.baseUrl}/search`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-anon-token': invalidTokenValue
+      },
+      body: JSON.stringify({ keywords: 'budget hack' })
+    });
+
+    assert.equal(missingTokenResponse.status, 401);
+    assert.equal(blankTokenResponse.status, 401);
+    assert.equal(invalidTokenResponse.status, 401);
+    assert.equal(createJobCalls, 0);
+
+    const rejectionReasons = logs
+      .filter((entry) => entry.event === 'search_rejected')
+      .map((entry) => entry.reason);
+
+    assert.deepEqual(rejectionReasons, ['missing_anon_token', 'blank_anon_token', 'invalid_anon_token']);
+    assert.equal(JSON.stringify(logs).includes(invalidTokenValue), false);
+  } finally {
+    await server.close();
+  }
+});
+
+test('search accepted logging hashes the token and avoids leaking its raw value', async () => {
+  resetSearchRateLimits();
+
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = createStructuredLogger((entry) => logs.push(entry));
+  const rawToken = '123e4567-e89b-42d3-a456-426614174000';
+  const jobs = {
+    createJob() {
+      return { jobId: 'job-accepted' };
+    },
+    getJob: () => null,
+    getClips: () => null,
+    findClip: () => null
+  };
+
+  const server = await startAppServer(createApp(clientDir, jobs, { logger }));
+
+  try {
+    const response = await fetch(`${server.baseUrl}/search`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-anon-token': rawToken
+      },
+      body: JSON.stringify({ keywords: 'budget hack' })
+    });
+    const payload = (await response.json()) as { jobId?: string };
+
+    assert.equal(response.status, 202);
+    assert.equal(payload.jobId, 'job-accepted');
+
+    const acceptedLog = logs.find((entry) => entry.event === 'search_accepted');
+    assert.ok(acceptedLog);
+    assert.equal(typeof acceptedLog.tokenHash, 'string');
+    assert.equal(JSON.stringify(logs).includes(rawToken), false);
+  } finally {
+    await server.close();
+  }
+});
+
+test('rate limiting preserves per-ip and per-token guardrails', () => {
+  resetSearchRateLimits();
+
+  const token = '123e4567-e89b-42d3-a456-426614174001';
+  let ipResult = checkSearchRateLimit('127.0.0.1', token);
+  for (let index = 1; index < APP_CONFIG.rateLimits.searchPerMinutePerIp; index += 1) {
+    ipResult = checkSearchRateLimit('127.0.0.1', token);
+  }
+  const blockedByIp = checkSearchRateLimit('127.0.0.1', token);
+
+  assert.equal(ipResult.allowed, true);
+  assert.equal(blockedByIp.allowed, false);
+  assert.equal(blockedByIp.limitedBy, 'ip');
+
+  resetSearchRateLimits();
+
+  const sharedToken = '123e4567-e89b-42d3-a456-426614174002';
+  let tokenResult = checkSearchRateLimit('10.0.0.1', sharedToken);
+  for (let index = 1; index < APP_CONFIG.rateLimits.searchPerMinutePerToken; index += 1) {
+    tokenResult = checkSearchRateLimit(`10.0.0.${index + 1}`, sharedToken);
+  }
+  const blockedByToken = checkSearchRateLimit('10.0.0.99', sharedToken);
+
+  assert.equal(tokenResult.allowed, true);
+  assert.equal(blockedByToken.allowed, false);
+  assert.equal(blockedByToken.limitedBy, 'token');
+});
+
+test('search logs guardrail triggers when the per-ip limit is exceeded', async () => {
+  resetSearchRateLimits();
+
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = createStructuredLogger((entry) => logs.push(entry));
+  const rawToken = '123e4567-e89b-42d3-a456-426614174003';
+  let createJobCalls = 0;
+  const jobs = {
+    createJob() {
+      createJobCalls += 1;
+      return { jobId: `job-${createJobCalls}` };
+    },
+    getJob: () => null,
+    getClips: () => null,
+    findClip: () => null
+  };
+
+  const server = await startAppServer(createApp(clientDir, jobs, { logger }));
+
+  try {
+    for (let index = 0; index < APP_CONFIG.rateLimits.searchPerMinutePerIp; index += 1) {
+      const response = await fetch(`${server.baseUrl}/search`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-anon-token': rawToken
+        },
+        body: JSON.stringify({ keywords: 'budget hack' })
+      });
+      assert.equal(response.status, 202);
+    }
+
+    const limitedResponse = await fetch(`${server.baseUrl}/search`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-anon-token': rawToken
+      },
+      body: JSON.stringify({ keywords: 'budget hack' })
+    });
+
+    assert.equal(limitedResponse.status, 429);
+    assert.ok(
+      logs.some(
+        (entry) =>
+          entry.event === 'guardrail_triggered' &&
+          entry.reason === 'search_rate_limit_exceeded' &&
+          entry.limitedBy === 'ip'
+      )
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test('jobs explicitly degrade when the transcript provider cannot serve youtube-captions mode', async () => {
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = createStructuredLogger((entry) => logs.push(entry));
+  const discovered = await createMockDiscoveryProvider().discover('surprise speech budget hack');
+
+  const transcriptProvider: TranscriptProvider = {
+    providerName: 'youtube-captions',
+    getCacheKey(targetVideo, language) {
+      return `yt:${targetVideo.sourceId}:${language}:youtube-captions`;
+    },
+    async getTranscript() {
+      throw new ProviderError(
+        'youtube-captions',
+        'unavailable',
+        'Transcript provider youtube-captions is not available in this runtime'
+      );
+    }
+  };
+
+  const pipeline = createPipeline({
+    discoveryProvider: {
+      providerName: 'stub-discovery',
+      discover: async () => discovered.slice(0, 2)
+    },
+    transcriptProvider,
+    logger
+  });
+  const jobs = new JobStore({ pipeline, logger });
+
+  const created = jobs.createJob('surprise speech budget hack');
+  const job = await waitForJobTerminalState(jobs, created.jobId);
+
+  assert.equal(job.status, 'degraded');
+  assert.equal(job.stage, 'done');
+  assert.equal(job.clips.length, 0);
+  assert.ok(
+    logs.some(
+      (entry) =>
+        entry.event === 'provider_failure' &&
+        entry.jobId === created.jobId &&
+        entry.stage === 'transcript' &&
+        entry.provider === 'youtube-captions' &&
+        entry.reason === 'unavailable'
+    )
+  );
+  assert.ok(
+    logs.some(
+      (entry) =>
+        entry.event === 'provider_degraded' &&
+        entry.jobId === created.jobId &&
+        entry.reason === 'no_transcripts_available'
+    )
+  );
 });

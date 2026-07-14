@@ -1,10 +1,12 @@
 import { APP_CONFIG, RUNTIME_CONFIG } from './config.js';
+import { type StructuredLogger, createStructuredLogger } from './logging.js';
 import { MOCK_VIDEO_LIBRARY } from './mockData.js';
 import { deriveRelevanceScore } from './relevance.js';
 import type { CandidateVideoLite, TranscriptCacheEntry } from './types.js';
 import { normalizeKeywords } from './utils.js';
 
 export interface DiscoveryProvider {
+  readonly providerName: string;
   discover(keywords: string): Promise<CandidateVideoLite[]>;
 }
 
@@ -12,6 +14,19 @@ export interface TranscriptProvider {
   readonly providerName: string;
   getCacheKey(video: CandidateVideoLite, language: string): string;
   getTranscript(video: CandidateVideoLite, language: string): Promise<TranscriptCacheEntry | null>;
+}
+
+export type ProviderFailureReason = 'timeout' | 'failure' | 'unavailable';
+
+export class ProviderError extends Error {
+  constructor(
+    readonly providerName: string,
+    readonly reason: ProviderFailureReason,
+    message: string
+  ) {
+    super(message);
+    this.name = 'ProviderError';
+  }
 }
 
 interface YouTubeSearchResponse {
@@ -51,7 +66,7 @@ const parseIsoDuration = (value: string | undefined) => {
   return days * 86400 + hours * 3600 + minutes * 60 + seconds;
 };
 
-const fetchJson = async <TResponse>(url: string, apiKey: string, fetchImpl: typeof fetch) => {
+const fetchJson = async <TResponse>(url: string, providerName: string, fetchImpl: typeof fetch) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 6_000);
 
@@ -62,19 +77,26 @@ const fetchJson = async <TResponse>(url: string, apiKey: string, fetchImpl: type
     });
 
     if (!response.ok) {
-      throw new Error('Upstream provider request failed');
+      throw new ProviderError(providerName, 'failure', 'Upstream provider request failed');
     }
 
     return (await response.json()) as TResponse;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('Upstream provider request timed out');
+      throw new ProviderError(providerName, 'timeout', 'Upstream provider request timed out');
     }
 
-    throw error instanceof Error ? new Error(error.message) : new Error('Unknown upstream provider failure');
+    if (error instanceof ProviderError) {
+      throw error;
+    }
+
+    if (error instanceof Error) {
+      throw new ProviderError(providerName, 'failure', error.message);
+    }
+
+    throw new ProviderError(providerName, 'failure', 'Unknown upstream provider failure');
   } finally {
     clearTimeout(timeout);
-    void apiKey;
   }
 };
 
@@ -87,6 +109,8 @@ const toSafeErrorMessage = (error: unknown) => {
 };
 
 class MockDiscoveryProvider implements DiscoveryProvider {
+  readonly providerName = 'mock';
+
   async discover(keywords: string) {
     const normalized = normalizeKeywords(keywords);
 
@@ -124,6 +148,8 @@ class MockTranscriptProvider implements TranscriptProvider {
 }
 
 export class YouTubeDataDiscoveryProvider implements DiscoveryProvider {
+  readonly providerName = 'youtube-data-api';
+
   constructor(
     private readonly apiKey: string,
     private readonly fetchImpl: typeof fetch = fetch
@@ -131,7 +157,7 @@ export class YouTubeDataDiscoveryProvider implements DiscoveryProvider {
 
   async discover(keywords: string) {
     if (!this.apiKey) {
-      throw new Error('Missing YouTube Data API configuration');
+      throw new ProviderError(this.providerName, 'failure', 'Missing YouTube Data API configuration');
     }
 
     const maxResults = APP_CONFIG.jobCaps.maxVideosPerJob;
@@ -146,7 +172,7 @@ export class YouTubeDataDiscoveryProvider implements DiscoveryProvider {
       'items(id/videoId,snippet/title,snippet/channelTitle,snippet/publishedAt)'
     );
 
-    const searchResponse = await fetchJson<YouTubeSearchResponse>(searchUrl.toString(), this.apiKey, this.fetchImpl);
+    const searchResponse = await fetchJson<YouTubeSearchResponse>(searchUrl.toString(), this.providerName, this.fetchImpl);
     const rankedItems = (searchResponse.items ?? [])
       .map((item, index) => ({
         sourceId: item.id?.videoId?.trim() || '',
@@ -167,7 +193,7 @@ export class YouTubeDataDiscoveryProvider implements DiscoveryProvider {
     detailsUrl.searchParams.set('id', rankedItems.map((item) => item.sourceId).join(','));
     detailsUrl.searchParams.set('fields', 'items(id,contentDetails/duration)');
 
-    const detailResponse = await fetchJson<YouTubeVideosResponse>(detailsUrl.toString(), this.apiKey, this.fetchImpl);
+    const detailResponse = await fetchJson<YouTubeVideosResponse>(detailsUrl.toString(), this.providerName, this.fetchImpl);
     const durationById = new Map(
       (detailResponse.items ?? [])
         .filter((item): item is Required<Pick<NonNullable<YouTubeVideosResponse['items']>[number], 'id' | 'contentDetails'>> => {
@@ -196,23 +222,32 @@ export class YouTubeDataDiscoveryProvider implements DiscoveryProvider {
   }
 }
 
-class UnavailableTranscriptProvider implements TranscriptProvider {
+class ExplicitDegradedTranscriptProvider implements TranscriptProvider {
   readonly providerName = 'youtube-captions';
 
   getCacheKey(video: CandidateVideoLite, language: string) {
     return `yt:${video.sourceId}:${language}:youtube-captions`;
   }
 
-  async getTranscript() {
-    return null;
+  async getTranscript(video: CandidateVideoLite, language: string): Promise<TranscriptCacheEntry | null> {
+    throw new ProviderError(
+      this.providerName,
+      'unavailable',
+      `Transcript provider ${this.providerName} is not available for ${video.sourceId} (${language}) in this runtime`
+    );
   }
 }
 
 class FallbackDiscoveryProvider implements DiscoveryProvider {
+  readonly providerName: string;
+
   constructor(
     private readonly primary: DiscoveryProvider,
-    private readonly fallback: DiscoveryProvider
-  ) {}
+    private readonly fallback: DiscoveryProvider,
+    private readonly logger: StructuredLogger
+  ) {
+    this.providerName = `${this.primary.providerName}-fallback-${this.fallback.providerName}`;
+  }
 
   async discover(keywords: string) {
     try {
@@ -220,45 +255,23 @@ class FallbackDiscoveryProvider implements DiscoveryProvider {
       if (videos.length > 0) {
         return videos;
       }
-      console.warn('Primary discovery provider returned no videos; using fallback provider.');
+      this.logger.warn('provider_fallback', {
+        stage: 'discovery',
+        provider: this.primary.providerName,
+        fallbackProvider: this.fallback.providerName,
+        reason: 'empty_result'
+      });
     } catch (error) {
-      console.warn(`Primary discovery provider failed; using fallback provider. Reason: ${toSafeErrorMessage(error)}`);
+      this.logger.warn('provider_fallback', {
+        stage: 'discovery',
+        provider: this.primary.providerName,
+        fallbackProvider: this.fallback.providerName,
+        reason: error instanceof ProviderError ? error.reason : 'failure',
+        detail: toSafeErrorMessage(error)
+      });
     }
 
     return this.fallback.discover(keywords);
-  }
-}
-
-class FallbackTranscriptProvider implements TranscriptProvider {
-  readonly providerName: string;
-
-  constructor(
-    private readonly primary: TranscriptProvider,
-    private readonly fallback: TranscriptProvider
-  ) {
-    this.providerName = `${primary.providerName}-fallback-${fallback.providerName}`;
-  }
-
-  getCacheKey(video: CandidateVideoLite, language: string) {
-    return `yt:${video.sourceId}:${language}:${this.providerName}`;
-  }
-
-  async getTranscript(video: CandidateVideoLite, language: string) {
-    try {
-      const transcript = await this.primary.getTranscript(video, language);
-      if (transcript) {
-        return transcript;
-      }
-      console.warn(
-        `Primary transcript provider returned no transcript for ${video.sourceId} (${language}); using fallback provider.`
-      );
-    } catch (error) {
-      console.warn(
-        `Primary transcript provider failed for ${video.sourceId} (${language}); using fallback provider. Reason: ${toSafeErrorMessage(error)}`
-      );
-    }
-
-    return this.fallback.getTranscript(video, language);
   }
 }
 
@@ -266,11 +279,12 @@ export const createMockDiscoveryProvider = () => new MockDiscoveryProvider();
 
 export const createMockTranscriptProvider = () => new MockTranscriptProvider();
 
-export const createConfiguredDiscoveryProvider = () => {
+export const createConfiguredDiscoveryProvider = (logger: StructuredLogger = createStructuredLogger()) => {
   if (RUNTIME_CONFIG.discoveryProvider === 'youtube-data-api') {
     return new FallbackDiscoveryProvider(
       new YouTubeDataDiscoveryProvider(RUNTIME_CONFIG.youtubeDataApiKey),
-      createMockDiscoveryProvider()
+      createMockDiscoveryProvider(),
+      logger
     );
   }
 
@@ -279,7 +293,7 @@ export const createConfiguredDiscoveryProvider = () => {
 
 export const createConfiguredTranscriptProvider = () => {
   if (RUNTIME_CONFIG.transcriptProvider === 'youtube-captions') {
-    return new FallbackTranscriptProvider(new UnavailableTranscriptProvider(), createMockTranscriptProvider());
+    return new ExplicitDegradedTranscriptProvider();
   }
 
   return createMockTranscriptProvider();

@@ -1,0 +1,148 @@
+metadata:
+  execution_id: EXE-0002
+  title: Transcript acquisition, anonymous token, and stage logging hardening
+  status: completed
+  owners:
+    - engineering
+    - qa_security
+    - orchestrator
+  directive_refs:
+    - DIR-0001
+  last_updated: 2026-07-13
+
+scope:
+  objective: Close the remaining provider-integration blockers by implementing a real transcript path or explicit failure path, enforcing anonymous-token requirements, and adding structured search and provider-stage logging.
+  in_scope:
+    - transcript-provider completion for youtube-captions mode or explicit deterministic degraded-path handling without silent mock fallback
+    - anonymous-token enforcement for POST /search
+    - per-token and per-IP search guardrail enforcement validation
+    - structured logging for search accepted or rejected, provider failure, timeout, fallback, and guardrail triggers
+    - regression tests for transcript, auth, rate-limit, and logging behavior
+  out_of_scope:
+    - Hume audio integration
+    - scoring model redesign
+    - rendered clip pipeline changes
+    - full account-based authentication
+    - frontend feature expansion beyond compatibility verification
+
+handoff:
+  owners:
+    orchestrator: DOE Orchestrator
+    project_manager: DOE Project Manager
+    ux_ui: N/A
+    engineering: DOE Full Stack Delivery
+    qa_security: DOE QA Security
+    ci_enforcement: N/A
+  acceptance_criteria:
+    - POST /search rejects missing, blank, malformed, or invalid anonymous tokens before starting expensive work.
+    - Search entry enforces both per-token and per-IP guardrails without trusting spoofable proxy headers by default.
+    - Transcript-provider mode no longer silently falls back to mock behavior for real-provider execution; it either returns real transcripts or degrades explicitly and observably.
+    - Search and provider-stage logs include job correlation, reason, and stage or provider fields without leaking secrets or raw tokens.
+    - Existing API response shapes for search, jobs, and clips remain backward compatible.
+    - Build and automated regression coverage remain green.
+  risk_tier: high
+  risk_rationale: This slice touches authentication entry, rate limiting, transcript-provider reliability, and observability, all of which affect abuse resistance and release readiness.
+  threat_or_abuse_assumptions:
+    - missing or spoofed anonymous tokens may be used to force high-cost search behavior
+    - spoofed forwarding headers may be used to bypass IP-based throttling
+    - provider failures and malformed caption payloads must not expose secrets or leave jobs stuck
+  validation_plan:
+    engineering:
+      - npm run build
+      - npm test
+      - integration tests for anonymous-token rejection, rate-limit rejection, transcript degraded path, and provider/logging events
+    qa_security:
+      - negative-path verification for missing or invalid token, spoofed IP headers, provider timeout, no-caption, and malformed transcript payload
+      - secret-redaction and log-sanitization review
+    ci_enforcement:
+      - N/A until CI automation expansion is requested
+  release_gates:
+    - anonymous token enforcement is evidenced with automated tests
+    - transcript-provider path is real or explicitly degraded without silent fallback
+    - structured logs are present and sanitized
+    - API contracts remain unchanged
+    - rollback to mock transcript mode or previous auth behavior is isolated and documented
+  rollback_expectation:
+    - transcript provider mode remains configuration-gated for rollback
+    - auth and logging changes stay isolated to server entry points and can be reverted in one deploy if needed
+
+quality_gates:
+  definition_of_ready:
+    project_manager: pass
+    ux_ui: n/a
+    qa_security: pass
+    ci_enforcement: n/a
+    notes:
+      - QA blockers from EXE-0001 are explicitly translated into this slice acceptance criteria.
+      - Scope remains server-focused and preserves current UI and API contracts.
+  definition_of_done:
+    engineering: pass
+    qa_security: pass
+    ci_enforcement: n/a
+    orchestrator: pass
+    notes:
+      - Engineering implemented anonymous-token enforcement, proxy-trust hardening, explicit transcript-provider degraded behavior, structured logging, and automated regression coverage.
+      - QA/security verified the acceptance criteria with build passing and 11 of 11 tests passing, including token rejection, guardrail logging, and explicit transcript degraded-path tests.
+
+backlog:
+  items:
+    - SLICE-5-real-transcript-auth-logging-hardening
+    - mvp-transcript-auth-hardening
+  dependencies:
+    - EXE-0001 provider boundary and cache foundation committed
+    - branch 2026/feat/mvp-foundation-app
+
+implementation:
+  systems_touched:
+    - api
+    - job orchestrator
+    - rate limiting
+    - transcript provider
+    - logging
+    - tests
+  approach:
+    - enforce anonymous token requirements at search entry before job creation
+    - harden IP extraction and guardrails for rate limiting
+    - replace silent transcript fallback in real-provider mode with explicit real-provider behavior or explicit degraded-path signaling
+    - add structured, sanitized logging for search decisions and provider-stage outcomes
+  preview:
+    run_command: npm run dev
+    verification: Valid token requests succeed, invalid token requests are rejected, transcript failures degrade explicitly, and logs reflect the staged outcomes without schema changes.
+  deployment:
+    free_host_provider: Vercel
+    steps:
+      - configure anonymous-token and provider-related runtime environment variables
+      - run npm run build during deployment
+      - verify accepted and rejected search flows plus degraded transcript behavior after deploy
+  rollback:
+    - revert transcript provider mode to mock
+    - revert token enforcement and structured logging changes if needed with explicit risk acknowledgement
+
+validation:
+  engineering_checks:
+    - build
+    - existing deterministic pipeline regression tests
+    - new auth, transcript, and logging integration tests
+  qa_checks:
+    - anonymous token missing or invalid rejection scenarios
+    - provider timeout, no-caption, and malformed transcript degraded scenarios
+    - API contract regression for search, job status, and clips endpoints
+  security_checks:
+    - no secret or raw token leakage in logs or client responses
+    - proxy-spoofing does not bypass default IP guardrails
+    - guardrail and provider-failure logs are present and sanitized
+  evidence:
+    - npm run build -> pass
+    - npm test -> pass (11/11 tests)
+    - POST /search rejects missing, blank, and malformed anonymous tokens before job creation
+    - structured logs redact raw token values and log only hashed token and IP identifiers
+    - rate-limit tests verify both per-IP and per-token guardrails plus guardrail_triggered logging
+    - transcript-provider tests verify explicit degraded behavior and provider_failure/provider_degraded events for youtube-captions mode
+
+risk:
+  residual_risks:
+    - youtube-captions mode is explicitly degraded and observable, but still not a real transcript integration
+    - transcript availability still depends on external caption coverage by video
+    - anonymous-token model remains lightweight compared with full user authentication
+    - in-memory rate limiting and cache behavior may differ from production-scale deployment
+  release_recommendation: go-with-risk
