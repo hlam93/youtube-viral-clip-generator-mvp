@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YouTube Viral Clip Generator MVP</title>
+    <link rel="stylesheet" href="/app.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">YouTube-only · deterministic mock MVP</p>
+        <h1>Find viral clip moments from keywords</h1>
+        <p class="subcopy">Search, poll job progress, and reveal timestamp-first clip cards as the job packages them.</p>
+      </section>
+
+      <section class="search-panel">
+        <form id="search-form" class="search-form">
+          <label class="sr-only" for="keywords">Keywords</label>
+          <input id="keywords" name="keywords" type="text" maxlength="200" placeholder="Try: surprise pitch, locker room speech, budget hack" required />
+          <button type="submit">Go</button>
+        </form>
+        <p id="message" class="message" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="status-grid" aria-label="Job status">
+        <div class="status-card">
+          <span class="status-label">Job</span>
+          <strong id="job-id">—</strong>
+        </div>
+        <div class="status-card">
+          <span class="status-label">Stage</span>
+          <strong id="stage">Idle</strong>
+        </div>
+        <div class="status-card">
+          <span class="status-label">Progress</span>
+          <strong id="progress">0%</strong>
+        </div>
+        <div class="status-card">
+          <span class="status-label">Clips ready</span>
+          <strong id="ready-count">0</strong>
+        </div>
+      </section>
+
+      <section>
+        <div id="clip-list" class="clip-list" aria-live="polite"></div>
+      </section>
+    </main>
+  </body>
+</html>
