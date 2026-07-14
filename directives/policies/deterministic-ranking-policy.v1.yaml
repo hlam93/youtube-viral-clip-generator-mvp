@@ -1,0 +1,40 @@
+metadata:
+  artifact_id: POLICY-DETERMINISTIC-RANKING-V1
+  artifact_type: deterministic_ranking_policy
+  version: v1
+  status: active
+  last_updated: 2026-07-13
+  source_documents:
+    - MISSION.md
+    - MVP_v1.md
+
+policy:
+  precision:
+    score_precision: 0.000001
+    rule: Round all intermediate scoring components and final viral_score before comparisons.
+  ranking:
+    stable_tie_break_order:
+      - field: viral_score
+        direction: desc
+      - field: window_start_sec
+        direction: asc
+      - field: window_end_sec
+        direction: asc
+      - field: video_id
+        direction: asc
+      - field: window_id
+        direction: asc
+    random_sampling_allowed: false
+    window_id_generation: canonical boundary signature
+  scoring_config_hash:
+    required_inclusions:
+      - transcript_emotion_model.name
+      - transcript_emotion_model.version
+      - fusion_weights
+      - quality_penalty_weights
+      - windowing_parameters
+      - language_handling_mode
+      - hume_model_and_configuration_identifiers
+  validation_checks:
+    - same input + same scoring_config_hash must produce identical top_k window IDs and order
+    - float precision normalization tests must pass for all ranking comparisons

@@ -1,0 +1,74 @@
+metadata:
+  artifact_id: CFG-SCORING-V1
+  artifact_type: scoring_config
+  version: v1
+  status: active
+  last_updated: 2026-07-13
+  source_documents:
+    - MISSION.md
+    - MVP_v1.md
+
+scoring_config:
+  scoring_config_hash_source_of_truth: directives/config/scoring-config.v1.yaml
+  inputs:
+    transcript_emotion_model:
+      name: external-or-local-emotion-model
+      version: "1.0.0"
+      low_confidence_threshold: 0.35
+      neutral_fallback_score: 0.5
+    relevance:
+      strategy: keyword-hybrid
+      normalization:
+        casefold: true
+        trim: true
+        collapse_whitespace: true
+      output_range:
+        - 0.0
+        - 1.0
+    hume:
+      provider: hume-expression-measurement
+      model_version: configured-server-side
+      pad_sec: 0
+      deterministic_chunking:
+        chunk_sec: 20
+        stride_sec: 20
+    fusion_weights:
+      relevance: 0.35
+      transcript_emotion: 0.25
+      audio_intensity: 0.30
+      quality_penalty: 0.10
+    quality_penalty_weights:
+      coverage_penalty: 0.4
+      timestamp_confidence_penalty: 0.4
+      length_penalty: 0.2
+  windowing:
+    min_clip_sec: 15
+    max_clip_sec: 60
+    default_window_sec: 30
+    stride_sec: 10
+    merge_overlap_pct: 0.5
+    merge_gap_sec: 2
+    min_separation_sec: 20
+  determinism:
+    score_precision: 0.000001
+    stable_sort_keys:
+      - field: viral_score
+        direction: desc
+      - field: window_start_sec
+        direction: asc
+      - field: window_end_sec
+        direction: asc
+      - field: video_id
+        direction: asc
+      - field: window_id
+        direction: asc
+  caching:
+    layer_a:
+      key_template: yt:{videoId}:{language}:{captionTrackSignature}
+      ttl_hours: 336
+    layer_b:
+      key_template: yt:{videoId}:{windowBoundarySignature}:{humeConfigHash}
+      ttl_hours: 72
+    layer_c:
+      key_template: yt:{videoId}:{scoringConfigHash}:{windowBoundarySignature}
+      ttl_hours: 24

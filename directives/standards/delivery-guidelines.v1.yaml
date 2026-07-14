@@ -1,0 +1,34 @@
+metadata:
+  artifact_id: STANDARD-DELIVERY-GUIDELINES-V1
+  artifact_type: delivery_guidelines
+  version: v1
+  status: active
+  last_updated: 2026-07-13
+  source_documents:
+    - MISSION.md
+    - MVP_v1.md
+
+scope:
+  applies_to:
+    - directives/*
+    - executions/*
+    - api contracts
+    - scoring and selection configurations
+
+principles:
+  human_readability:
+    - Use short sections, explicit labels, and predictable key names.
+    - Prefer concrete defaults over prose ambiguity.
+  token_efficiency_and_cost_optimization:
+    - Keep payloads minimal and bounded.
+    - Prefer cache-first paths and avoid duplicate compute.
+    - Document hard caps for expensive operations.
+  accuracy:
+    - Define deterministic formulas and thresholds explicitly.
+    - Keep schema-required fields and allowed enums unambiguous.
+  conciseness:
+    - Avoid non-actionable narrative in directives and execution records.
+    - Keep acceptance criteria observable and measurable.
+  performance:
+    - Include stage timeouts, concurrency limits, and progressive delivery behavior.
+    - Track cache hit rates and stage timings as mandatory metrics.

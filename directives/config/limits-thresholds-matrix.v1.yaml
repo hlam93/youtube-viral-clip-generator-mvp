@@ -1,0 +1,49 @@
+metadata:
+  artifact_id: CFG-LIMITS-THRESHOLDS-V1
+  artifact_type: limits_thresholds_matrix
+  version: v1
+  status: active
+  last_updated: 2026-07-13
+  source_documents:
+    - MISSION.md
+    - MVP_v1.md
+
+description: Cost and performance guardrails for MVP.
+
+job_caps:
+  max_videos_per_job: 25
+  max_candidate_windows_per_video: 30
+  max_total_windows_per_job: 300
+  max_rendered_clips_per_job: 3
+  max_job_duration_sec: 180
+
+timeouts_sec:
+  youtube_discovery: 12
+  transcript_fetch: 20
+  transcript_emotion: 20
+  hume_audio: 25
+  rendering: 45
+
+concurrency:
+  max_parallel_scoring_jobs: 4
+  max_parallel_hume_requests: 4
+  max_parallel_renders: 1
+
+mode_decision:
+  timestamp_coverage_threshold: 0.75
+  timestamp_confidence_threshold: 0.70
+  boundary_uncertainty_threshold: 0.25
+  rendered_mode_gate: high-score-but-timestamp-unreliable
+
+time_boxing:
+  early_stop_when_high_confidence_clips_ready: 8
+  high_confidence_threshold: 0.78
+
+rate_limits:
+  search_per_minute_per_ip: 12
+  search_per_minute_per_token: 20
+
+input_validation:
+  keyword_min_length: 1
+  keyword_max_length: 200
+  reject_mostly_non_alphanumeric: true

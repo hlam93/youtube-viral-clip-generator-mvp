@@ -1,0 +1,145 @@
+metadata:
+  artifact_id: CONTRACT-API-CACHE-SCHEMAS-V1
+  artifact_type: api_cache_contract
+  version: v1
+  status: active
+  last_updated: 2026-07-13
+  source_documents:
+    - MISSION.md
+    - MVP_v1.md
+
+api:
+  post_search:
+    request:
+      type: object
+      required:
+        - keywords
+      properties:
+        keywords:
+          type: string
+          minLength: 1
+          maxLength: 200
+    response:
+      type: object
+      required:
+        - jobId
+      properties:
+        jobId:
+          type: string
+  get_job:
+    response:
+      type: object
+      required:
+        - jobId
+        - status
+        - stage
+        - progressPct
+      properties:
+        jobId:
+          type: string
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - completed
+            - degraded
+            - failed
+        stage:
+          type: string
+          enum:
+            - discovery
+            - transcript
+            - scoring
+            - selection
+            - packaging
+            - done
+        progressPct:
+          type: number
+          minimum: 0
+          maximum: 100
+        clipsReadyCount:
+          type: integer
+          minimum: 0
+  get_clips:
+    response:
+      type: object
+      required:
+        - jobId
+        - clips
+      properties:
+        jobId:
+          type: string
+        clips:
+          type: array
+          items:
+            type: object
+            required:
+              - mode
+              - platform
+              - videoId
+              - startTimeSec
+              - endTimeSec
+              - viralScore
+            properties:
+              mode:
+                type: string
+                enum:
+                  - timestamp
+                  - rendered
+              platform:
+                type: string
+                enum:
+                  - youtube
+              videoId:
+                type: string
+              startTimeSec:
+                type: number
+                minimum: 0
+              endTimeSec:
+                type: number
+                minimum: 0
+              viralScore:
+                type: number
+              playUrl:
+                type: string
+              clipFileUrl:
+                type: string
+              channelName:
+                type: string
+              title:
+                type: string
+
+cache:
+  transcript_layer_a:
+    required:
+      - videoId
+      - language
+      - captionTrackSignature
+      - segments
+      - coverage
+      - timestampConfidence
+    segment_shape:
+      startSec: number
+      endSec: number
+      text: string
+  audio_layer_b:
+    required:
+      - videoId
+      - windowBoundarySignature
+      - humeConfigHash
+      - audioEmotionOutputs
+      - audioIntensity
+    audio_intensity_range:
+      - 0.0
+      - 1.0
+  ensemble_layer_c:
+    required:
+      - videoId
+      - windowBoundarySignature
+      - scoringConfigHash
+      - relevanceScore
+      - transcriptEmotionScore
+      - audioIntensity
+      - qualityPenalty
+      - viralScore

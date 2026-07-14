@@ -1,0 +1,78 @@
+metadata:
+  directive_id: DIR-0001
+  title: YouTube-only viral clip generator MVP baseline
+  status: active
+  owners:
+    - product
+    - architecture
+    - engineering
+  last_updated: 2026-07-13
+
+context:
+  problem_statement: Users need fast keyword-to-clip discovery from YouTube with low-cost deterministic ranking and progressive results.
+  target_users:
+    - content researchers
+    - social media managers
+    - trend analysts
+  outcomes:
+    - Progressive feed appears after search and improves as job advances.
+    - Majority of clips are timestamp mode with playable YouTube URLs.
+    - Ranking is deterministic for the same scoringConfigHash.
+    - Repeated searches reduce expensive recompute using cache layers.
+  non_goals:
+    - manual user clip editing or approvals
+    - non-YouTube discovery sources
+    - rendered clips as default mode
+
+delivery:
+  release_slices:
+    - SLICE-1-api-and-job-orchestration
+    - SLICE-2-transcript-windowing-and-scoring
+    - SLICE-3-selection-packaging-and-progressive-feed
+  dependencies:
+    - YouTube Data API key configured
+    - Hume API key configured
+  acceptance_criteria:
+    - POST /search returns a jobId for valid keywords.
+    - GET /jobs/{jobId} exposes stage and progress for polling.
+    - GET /jobs/{jobId}/clips returns mode, bounds, score, and playable URL.
+    - Rendered mode is capped per job and used only on reliability failures.
+  web_deployment:
+    preview_required: true
+    free_host_targets:
+      - Vercel
+    deployment_notes:
+      - Runtime secrets must be set via host environment variable settings.
+
+security:
+  scope: business-app
+  data_classification: internal
+  trust_boundaries:
+    - browser -> api
+    - api -> YouTube Data API
+    - api -> Hume API
+    - api -> cache/store
+  authn: required
+  authz_model: anonymous token with per-token and per-IP rate limits
+  abuse_cases:
+    - keyword spam to force high compute cost
+    - malformed keyword payloads to bypass validation
+  logging_requirements:
+    - search request accepted/rejected with reason
+    - upstream timeout/failure by stage and provider
+    - per-job cost guardrail triggers
+
+quality:
+  test_expectations:
+    - unit
+    - integration
+    - regression
+  accessibility:
+    - WCAG 2.1 AA for web search and clip feed interactions
+  observability:
+    - cache_hit_rate_layer_a
+    - cache_hit_rate_layer_b
+    - stage_duration_ms
+    - rendered_fallback_rate
+    - job_cost_proxy_units
+
