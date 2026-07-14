@@ -62,11 +62,51 @@ npm start
 npm test
 ```
 
-## Free-host deployment note
+## Free-host deployment (MVP launch)
 
-This MVP is structured as a single Node web app.
+This MVP is a single Node web app that can run on free tiers.
 
-- Preview locally: `npm run dev`
-- Production-style local verification: `npm run build` then `npm start`
-- Vercel: create a project, set the build command to `npm run build`, set the output to the default Node deployment, and add the runtime environment variables in the Vercel dashboard
-- Render/Railway: deploy as a Node service with `npm run build` and `npm start`
+### Prerequisites
+
+1. Push this repo to GitHub.
+2. Prepare provider secrets:
+   - `YOUTUBE_DATA_API_KEY`
+   - `HUME_API_KEY`
+3. Use explicit production provider modes:
+   - `DISCOVERY_PROVIDER=youtube-data-api`
+   - `TRANSCRIPT_PROVIDER=youtube-captions`
+   - `TRANSCRIPT_EMOTION_PROVIDER=pinned-local-model`
+   - `AUDIO_EMOTION_PROVIDER=hume-expression-measurement`
+
+### Option A: Vercel (free)
+
+1. In Vercel, **Add New Project** and import this repository.
+2. Framework preset: **Other** (Node app).
+3. Build command: `npm run build`
+4. Start command: `npm start`
+5. Add runtime environment variables in the Vercel project settings (Production environment):
+   - required: `DISCOVERY_PROVIDER`, `TRANSCRIPT_PROVIDER`, `TRANSCRIPT_EMOTION_PROVIDER`, `AUDIO_EMOTION_PROVIDER`, `YOUTUBE_DATA_API_KEY`, `HUME_API_KEY`
+   - optional tuning: `HUME_MODEL_VERSION`, `HUME_API_BASE_URL`, `TRANSCRIPT_CACHE_TTL_MS`, `AUDIO_CACHE_TTL_MS`, `ENSEMBLE_CACHE_TTL_MS`, `TRUST_PROXY_HEADERS`
+6. Deploy.
+7. Verify deployment by calling:
+   - `POST /search` with header `x-anon-token: <uuid>`
+   - `GET /jobs/:jobId`
+   - `GET /jobs/:jobId/clips`
+
+### Option B: Render or Railway (free)
+
+1. Create a new **Web Service** from this repository.
+2. Runtime: Node.
+3. Build command: `npm run build`
+4. Start command: `npm start`
+5. Add the same environment variables listed above.
+6. Deploy and run the same API verification sequence.
+
+### Pre-launch checks
+
+Run locally before deploying:
+
+```bash
+npm run build
+npm test
+```
