@@ -1,5 +1,5 @@
 import { AsyncValueCache } from './cache.js';
-import { APP_CONFIG, RUNTIME_CONFIG, SCORING_CONFIG_HASH } from './config.js';
+import { APP_CONFIG, RUNTIME_CONFIG, buildScoringConfigHash } from './config.js';
 import { type StructuredLogger, createStructuredLogger } from './logging.js';
 import {
   createConfiguredDiscoveryProvider,
@@ -11,54 +11,32 @@ import {
   type TranscriptProvider
 } from './providers.js';
 import { deriveRelevanceScore } from './relevance.js';
+import {
+  HumeExpressionMeasurementAudioProvider,
+  PinnedTranscriptEmotionProvider,
+  createConfiguredAudioEmotionProvider,
+  createConfiguredTranscriptEmotionProvider,
+  DeterministicAudioEmotionProvider,
+  type AudioEmotionProvider,
+  type TranscriptEmotionProvider
+} from './scoringProviders.js';
 import { MalformedTranscriptError, assertValidTranscriptEntry } from './transcript.js';
-import type {
-  AudioEmotionOutput,
-  CandidateVideoLite,
-  ClipCard,
-  ScoredWindow,
-  TranscriptCacheEntry
-} from './types.js';
-import { hashValue, roundScore, tokenize } from './utils.js';
+import type { AudioEmotionOutput, CandidateVideoLite, ClipCard, ScoredWindow, TranscriptCacheEntry } from './types.js';
+import { hashValue, normalizeKeywords, roundScore } from './utils.js';
 
 interface VideoContext {
   video: CandidateVideoLite;
   transcript: TranscriptCacheEntry;
 }
 
-const EXCITEMENT_WORDS = new Set([
-  'amazing',
-  'belief',
-  'cheer',
-  'cheers',
-  'clapping',
-  'confession',
-  'electric',
-  'emotional',
-  'erupts',
-  'fierce',
-  'gasps',
-  'grin',
-  'incredible',
-  'joyful',
-  'laughing',
-  'massive',
-  'raw',
-  'shareable',
-  'shocked',
-  'smiling',
-  'stunned',
-  'surprise',
-  'surprising',
-  'tear',
-  'twist',
-  'unbelievable',
-  'unstoppable',
-  'viral'
-]);
+export interface ScoredWindowsResult {
+  windows: ScoredWindow[];
+  degraded: boolean;
+  attemptedWindowCount: number;
+  failedWindowCount: number;
+}
 
-const sortVideos = (left: CandidateVideoLite, right: CandidateVideoLite) =>
-  left.sourceId.localeCompare(right.sourceId);
+const sortVideos = (left: CandidateVideoLite, right: CandidateVideoLite) => left.sourceId.localeCompare(right.sourceId);
 
 const sortWindows = (left: ScoredWindow, right: ScoredWindow) =>
   right.viralScore - left.viralScore ||
@@ -72,34 +50,6 @@ const buildWindowText = (segments: TranscriptCacheEntry['segments'], startSec: n
     .filter((segment) => segment.endSec > startSec && segment.startSec < endSec)
     .map((segment) => segment.text)
     .join(' ');
-
-const deriveTranscriptEmotionScore = (text: string) => {
-  const tokens = tokenize(text);
-  const excitingHits = tokens.filter((token) => EXCITEMENT_WORDS.has(token)).length;
-  const base = excitingHits === 0 ? APP_CONFIG.scoring.transcriptEmotionModel.neutralFallbackScore : excitingHits / 4;
-  return roundScore(Math.min(1, Math.max(0, base)));
-};
-
-const deriveAudioEmotion = (videoId: string, windowSignature: string, text: string): AudioEmotionOutput => {
-  const tokens = tokenize(text);
-  const excitingHits = tokens.filter((token) => EXCITEMENT_WORDS.has(token)).length;
-  const seeded = parseInt(hashValue(`${videoId}:${windowSignature}`), 16);
-  const excitementBoost = Math.min(0.25, excitingHits * 0.05);
-  const baseline = 0.45 + ((seeded % 18) / 100);
-  const audioIntensity = roundScore(Math.min(1, baseline + excitementBoost));
-  const joyScore = roundScore(Math.max(0.2, audioIntensity - 0.08));
-  const surpriseScore = roundScore(Math.min(1, audioIntensity + 0.04));
-
-  return {
-    dominantEmotion: surpriseScore >= joyScore ? 'surprise' : 'joy',
-    audioIntensity,
-    humeConfigHash: hashValue(JSON.stringify(APP_CONFIG.scoring.hume)),
-    audioEmotionOutputs: [
-      { name: 'surprise', score: surpriseScore },
-      { name: 'joy', score: joyScore }
-    ]
-  };
-};
 
 const deriveQualityPenalty = (transcript: TranscriptCacheEntry, durationSec: number) => {
   const coveragePenalty = 1 - transcript.coverage;
@@ -118,25 +68,46 @@ const deriveQualityPenalty = (transcript: TranscriptCacheEntry, durationSec: num
 
 const windowKey = (videoId: string, startTimeSec: number, endTimeSec: number) => `${videoId}:${startTimeSec}:${endTimeSec}`;
 
+const isFatalScoringFailure = (error: unknown) =>
+  error instanceof ProviderError && ['missing_config', 'invalid_credentials'].includes(error.reason);
+
 interface PipelineOptions {
   discoveryProvider?: DiscoveryProvider;
   transcriptProvider?: TranscriptProvider;
+  transcriptEmotionProvider?: TranscriptEmotionProvider;
+  audioEmotionProvider?: AudioEmotionProvider;
   transcriptCacheTtlMs?: number;
+  audioCacheTtlMs?: number;
+  ensembleCacheTtlMs?: number;
   logger?: StructuredLogger;
 }
 
 export class ViralClipPipeline {
+  readonly scoringConfigHash: string;
+
   private readonly transcriptCache: AsyncValueCache<TranscriptCacheEntry>;
-  private readonly audioCache = new Map<string, Promise<AudioEmotionOutput>>();
-  private readonly ensembleCache = new Map<string, Promise<ScoredWindow>>();
+  private readonly audioCache: AsyncValueCache<AudioEmotionOutput>;
+  private readonly ensembleCache: AsyncValueCache<ScoredWindow>;
 
   constructor(
     private readonly discoveryProvider: DiscoveryProvider,
     private readonly transcriptProvider: TranscriptProvider,
+    private readonly transcriptEmotionProvider: TranscriptEmotionProvider,
+    private readonly audioEmotionProvider: AudioEmotionProvider,
     transcriptCacheTtlMs = RUNTIME_CONFIG.transcriptCacheTtlMs,
+    audioCacheTtlMs = RUNTIME_CONFIG.audioCacheTtlMs,
+    ensembleCacheTtlMs = RUNTIME_CONFIG.ensembleCacheTtlMs,
     private readonly logger: StructuredLogger = createStructuredLogger()
   ) {
     this.transcriptCache = new AsyncValueCache<TranscriptCacheEntry>(transcriptCacheTtlMs);
+    this.audioCache = new AsyncValueCache(audioCacheTtlMs);
+    this.ensembleCache = new AsyncValueCache(ensembleCacheTtlMs);
+    this.scoringConfigHash = buildScoringConfigHash({
+      transcriptEmotionProviderHash: transcriptEmotionProvider.configHash,
+      audioEmotionProviderHash: audioEmotionProvider.configHash,
+      transcriptEmotionProviderName: transcriptEmotionProvider.providerName,
+      audioEmotionProviderName: audioEmotionProvider.providerName
+    });
   }
 
   get discoveryProviderName() {
@@ -147,52 +118,82 @@ export class ViralClipPipeline {
     return this.transcriptProvider.providerName;
   }
 
+  get transcriptEmotionProviderName() {
+    return this.transcriptEmotionProvider.providerName;
+  }
+
+  get audioEmotionProviderName() {
+    return this.audioEmotionProvider.providerName;
+  }
+
   async discover(keywords: string) {
     return this.discoveryProvider.discover(keywords);
   }
 
   async getTranscript(video: CandidateVideoLite) {
     const language = APP_CONFIG.transcript.preferredLanguage;
-    return this.transcriptCache.getOrLoad(
-      this.transcriptProvider.getCacheKey(video, language),
-      async () => {
-        const transcript = await this.transcriptProvider.getTranscript(video, language);
-        if (!transcript) {
-          return null;
-        }
-
-        try {
-          return assertValidTranscriptEntry(transcript, {
-            videoId: video.sourceId,
-            language
-          });
-        } catch (error) {
-          if (error instanceof MalformedTranscriptError) {
-            throw new ProviderError(
-              this.transcriptProvider.providerName,
-              'failure',
-              `Malformed transcript payload for ${video.sourceId}`
-            );
-          }
-
-          throw error;
-        }
+    return this.transcriptCache.getOrLoad(this.transcriptProvider.getCacheKey(video, language), async () => {
+      const transcript = await this.transcriptProvider.getTranscript(video, language);
+      if (!transcript) {
+        return null;
       }
-    );
+
+      try {
+        return assertValidTranscriptEntry(transcript, {
+          videoId: video.sourceId,
+          language
+        });
+      } catch (error) {
+        if (error instanceof MalformedTranscriptError) {
+          throw new ProviderError(
+            this.transcriptProvider.providerName,
+            'failure',
+            `Malformed transcript payload for ${video.sourceId}`
+          );
+        }
+
+        throw error;
+      }
+    });
   }
 
-  async scoreWindows(keywords: string, contexts: VideoContext[]) {
+  async scoreWindows(keywords: string, contexts: VideoContext[]): Promise<ScoredWindowsResult> {
+    const normalizedKeywords = normalizeKeywords(keywords);
+    const startedAt = Date.now();
+    const attemptedWindowCount = contexts.reduce(
+      (total, context) => total + Math.min(context.transcript.segments.length, APP_CONFIG.jobCaps.maxCandidateWindowsPerVideo),
+      0
+    );
     const allWindows: ScoredWindow[] = [];
+    let failedWindowCount = 0;
 
     for (const context of contexts) {
-      const generated = await this.generateWindows(keywords, context);
-      allWindows.push(...generated);
+      const generated = await this.generateWindows(normalizedKeywords, context);
+      allWindows.push(...generated.windows);
+      failedWindowCount += generated.failedWindowCount;
       if (allWindows.length >= APP_CONFIG.jobCaps.maxTotalWindowsPerJob) {
         break;
       }
     }
 
-    return allWindows.slice(0, APP_CONFIG.jobCaps.maxTotalWindowsPerJob).sort(sortWindows);
+    this.logger.info('scoring_stage_completed', {
+      stage: 'scoring',
+      scoringConfigHash: this.scoringConfigHash,
+      attemptedWindowCount,
+      scoredWindowCount: allWindows.length,
+      failedWindowCount,
+      degraded: failedWindowCount > 0,
+      durationMs: Date.now() - startedAt,
+      audioCache: this.audioCache.snapshotStats(),
+      ensembleCache: this.ensembleCache.snapshotStats()
+    });
+
+    return {
+      windows: allWindows.slice(0, APP_CONFIG.jobCaps.maxTotalWindowsPerJob).sort(sortWindows),
+      degraded: failedWindowCount > 0,
+      attemptedWindowCount,
+      failedWindowCount
+    };
   }
 
   selectTopWindows(scoredWindows: ScoredWindow[]) {
@@ -270,12 +271,13 @@ export class ViralClipPipeline {
       }
     }
 
-    return packaged.sort((left, right) =>
-      right.viralScore - left.viralScore ||
-      left.startTimeSec - right.startTimeSec ||
-      left.endTimeSec - right.endTimeSec ||
-      left.videoId.localeCompare(right.videoId) ||
-      left.clipId.localeCompare(right.clipId)
+    return packaged.sort(
+      (left, right) =>
+        right.viralScore - left.viralScore ||
+        left.startTimeSec - right.startTimeSec ||
+        left.endTimeSec - right.endTimeSec ||
+        left.videoId.localeCompare(right.videoId) ||
+        left.clipId.localeCompare(right.clipId)
     );
   }
 
@@ -310,38 +312,63 @@ export class ViralClipPipeline {
       })
     );
 
-    return contexts
-      .filter((context): context is VideoContext => context !== null)
-      .sort((left, right) => sortVideos(left.video, right.video));
+    return contexts.filter((context): context is VideoContext => context !== null).sort((left, right) => sortVideos(left.video, right.video));
   }
 
   private async generateWindows(keywords: string, context: VideoContext) {
-    const results = await Promise.all(
-      context.transcript.segments
-        .slice(0, APP_CONFIG.jobCaps.maxCandidateWindowsPerVideo)
-        .map(async (segment, index) => {
-          const durationSec = Math.min(
-            APP_CONFIG.windowing.defaultWindowSec,
-            Math.max(APP_CONFIG.windowing.minClipSec, segment.endSec - segment.startSec + 12)
-          );
-          const startTimeSec = segment.startSec;
-          const endTimeSec = Math.min(context.video.durationSec, roundScore(startTimeSec + durationSec));
-          const text = buildWindowText(context.transcript.segments, startTimeSec, endTimeSec);
-          const boundarySignature = `${index}:${startTimeSec}:${endTimeSec}`;
-          const cacheKey = `yt:${context.video.sourceId}:${SCORING_CONFIG_HASH}:${boundarySignature}`;
-          const cached = this.ensembleCache.get(cacheKey);
+    const failures: unknown[] = [];
+    const results = await Promise.allSettled(
+      context.transcript.segments.slice(0, APP_CONFIG.jobCaps.maxCandidateWindowsPerVideo).map(async (segment, index) => {
+        const durationSec = Math.min(
+          APP_CONFIG.windowing.defaultWindowSec,
+          Math.max(APP_CONFIG.windowing.minClipSec, segment.endSec - segment.startSec + 12)
+        );
+        const startTimeSec = segment.startSec;
+        const endTimeSec = Math.min(context.video.durationSec, roundScore(startTimeSec + durationSec));
+        const text = buildWindowText(context.transcript.segments, startTimeSec, endTimeSec);
+        const boundarySignature = `${index}:${startTimeSec}:${endTimeSec}`;
+        const cacheKey = [
+          'yt',
+          context.video.sourceId,
+          hashValue(keywords),
+          context.transcript.captionTrackSignature,
+          this.scoringConfigHash,
+          boundarySignature
+        ].join(':');
 
-          if (cached) {
-            return cached;
-          }
-
-          const next = this.scoreWindow(keywords, context, startTimeSec, endTimeSec, text, boundarySignature);
-          this.ensembleCache.set(cacheKey, next);
-          return next;
-        })
+        return this.ensembleCache.getOrLoad(cacheKey, async () =>
+          this.scoreWindow(keywords, context, startTimeSec, endTimeSec, text, boundarySignature)
+        );
+      })
     );
 
-    return results.sort(sortWindows);
+    const windows: ScoredWindow[] = [];
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value) {
+        windows.push(result.value);
+        continue;
+      }
+
+      const error = result.status === 'rejected' ? result.reason : null;
+      if (isFatalScoringFailure(error)) {
+        throw error;
+      }
+
+      failures.push(error);
+      this.logger.warn('provider_failure', {
+        stage: 'scoring',
+        provider: error instanceof ProviderError ? error.providerName : this.audioEmotionProvider.providerName,
+        videoId: context.video.sourceId,
+        reason: error instanceof ProviderError ? error.reason : 'failure',
+        detail: error instanceof ProviderError ? error.message : 'Unknown scoring provider failure',
+        scoringConfigHash: this.scoringConfigHash
+      });
+    }
+
+    return {
+      windows: windows.sort(sortWindows),
+      failedWindowCount: failures.length
+    };
   }
 
   private async scoreWindow(
@@ -352,16 +379,31 @@ export class ViralClipPipeline {
     text: string,
     boundarySignature: string
   ) {
-    const audioKey = `yt:${context.video.sourceId}:${boundarySignature}:${hashValue(JSON.stringify(APP_CONFIG.scoring.hume))}`;
-    const cachedAudio = this.audioCache.get(audioKey);
-    const audioPromise = cachedAudio ?? Promise.resolve(deriveAudioEmotion(context.video.sourceId, boundarySignature, text));
-    if (!cachedAudio) {
-      this.audioCache.set(audioKey, audioPromise);
+    const transcriptEmotion = await this.transcriptEmotionProvider.scoreText(text);
+    const audio = await this.audioCache.getOrLoad(
+      [
+        'yt',
+        context.video.sourceId,
+        context.transcript.captionTrackSignature,
+        boundarySignature,
+        this.audioEmotionProvider.configHash
+      ].join(':'),
+      () =>
+        this.audioEmotionProvider.scoreWindow({
+          video: context.video,
+          transcript: context.transcript,
+          windowBoundarySignature: boundarySignature,
+          startTimeSec,
+          endTimeSec,
+          text
+        })
+    );
+    if (!audio) {
+      throw new ProviderError(this.audioEmotionProvider.providerName, 'failure', 'Audio emotion provider returned empty output');
     }
 
-    const audio = await audioPromise;
     const relevanceScore = deriveRelevanceScore(keywords, text, context.video.title, context.video.channelName);
-    const transcriptEmotionScore = deriveTranscriptEmotionScore(text);
+    const transcriptEmotionScore = roundScore(transcriptEmotion.score);
     const qualityPenalty = deriveQualityPenalty(context.transcript, endTimeSec - startTimeSec);
     const weights = APP_CONFIG.scoring.fusionWeights;
     const viralScore = roundScore(
@@ -381,10 +423,10 @@ export class ViralClipPipeline {
       text,
       relevanceScore,
       transcriptEmotionScore,
-      audioIntensity: audio.audioIntensity,
+      audioIntensity: roundScore(audio.audioIntensity),
       qualityPenalty,
       viralScore,
-      dominantEmotion: audio.dominantEmotion
+      dominantEmotion: audio.dominantEmotion || transcriptEmotion.dominantEmotion
     } satisfies ScoredWindow;
   }
 }
@@ -393,7 +435,11 @@ export const createPipeline = (options: PipelineOptions = {}) =>
   new ViralClipPipeline(
     options.discoveryProvider ?? createConfiguredDiscoveryProvider(options.logger),
     options.transcriptProvider ?? createConfiguredTranscriptProvider(),
+    options.transcriptEmotionProvider ?? createConfiguredTranscriptEmotionProvider(),
+    options.audioEmotionProvider ?? createConfiguredAudioEmotionProvider(),
     options.transcriptCacheTtlMs ?? RUNTIME_CONFIG.transcriptCacheTtlMs,
+    options.audioCacheTtlMs ?? RUNTIME_CONFIG.audioCacheTtlMs,
+    options.ensembleCacheTtlMs ?? RUNTIME_CONFIG.ensembleCacheTtlMs,
     options.logger ?? createStructuredLogger()
   );
 
@@ -401,6 +447,12 @@ export const createMockPipeline = () =>
   new ViralClipPipeline(
     createMockDiscoveryProvider(),
     createMockTranscriptProvider(),
+    new PinnedTranscriptEmotionProvider(),
+    new DeterministicAudioEmotionProvider(),
     APP_CONFIG.transcript.cacheTtlMs,
+    30 * 60 * 1000,
+    10 * 60 * 1000,
     createStructuredLogger()
   );
+
+export { DeterministicAudioEmotionProvider, HumeExpressionMeasurementAudioProvider, PinnedTranscriptEmotionProvider };

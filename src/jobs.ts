@@ -102,10 +102,20 @@ export class JobStore {
       this.update(job, 'scoring');
       await delay(120);
       const scored = await this.pipeline.scoreWindows(job.keywords, contexts);
+      if (scored.degraded) {
+        this.logger.warn('provider_degraded', {
+          jobId,
+          stage: 'scoring',
+          reason: 'partial_scoring_coverage',
+          failedWindowCount: scored.failedWindowCount,
+          attemptedWindowCount: scored.attemptedWindowCount,
+          scoringConfigHash: this.pipeline.scoringConfigHash
+        });
+      }
 
       this.update(job, 'selection');
       await delay(120);
-      const selected = this.pipeline.selectTopWindows(scored);
+      const selected = this.pipeline.selectTopWindows(scored.windows);
 
       this.update(job, 'packaging');
       await delay(100);
@@ -121,7 +131,14 @@ export class JobStore {
       job.error = error instanceof ProviderError ? error.message : 'Unknown job failure';
       const reason = error instanceof ProviderError ? error.reason : 'failure';
       const stage = job.stage;
-      const provider = stage === 'discovery' ? this.pipeline.discoveryProviderName : this.pipeline.transcriptProviderName;
+      const provider =
+        error instanceof ProviderError
+          ? error.providerName
+          : stage === 'discovery'
+            ? this.pipeline.discoveryProviderName
+            : stage === 'transcript'
+              ? this.pipeline.transcriptProviderName
+              : 'scoring-ensemble';
       this.logger.warn('provider_failure', {
         jobId,
         stage,

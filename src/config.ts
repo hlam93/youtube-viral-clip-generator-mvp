@@ -75,20 +75,6 @@ export const APP_CONFIG = {
   }
 } as const;
 
-const scoringHashSource = {
-  transcript_emotion_model: APP_CONFIG.scoring.transcriptEmotionModel,
-  fusion_weights: APP_CONFIG.scoring.fusionWeights,
-  quality_penalty_weights: APP_CONFIG.scoring.qualityPenaltyWeights,
-  windowing_parameters: APP_CONFIG.windowing,
-  language_handling_mode: 'single-active-language',
-  hume_model_and_configuration_identifiers: APP_CONFIG.scoring.hume
-};
-
-export const SCORING_CONFIG_HASH = createHash('sha1')
-  .update(JSON.stringify(scoringHashSource))
-  .digest('hex')
-  .slice(0, 12);
-
 const readPositiveInteger = (value: string | undefined, fallback: number) => {
   if (!value) {
     return fallback;
@@ -100,10 +86,20 @@ const readPositiveInteger = (value: string | undefined, fallback: number) => {
 
 export const DISCOVERY_PROVIDER_MODES = ['mock', 'youtube-data-api'] as const;
 export const TRANSCRIPT_PROVIDER_MODES = ['mock', 'youtube-captions'] as const;
+export const TRANSCRIPT_EMOTION_PROVIDER_MODES = ['pinned-local-model'] as const;
+export const AUDIO_EMOTION_PROVIDER_MODES = ['hume-expression-measurement'] as const;
 
 export type DiscoveryProviderMode = (typeof DISCOVERY_PROVIDER_MODES)[number];
 export type TranscriptProviderMode = (typeof TRANSCRIPT_PROVIDER_MODES)[number];
-export type RuntimeConfigField = 'DISCOVERY_PROVIDER' | 'TRANSCRIPT_PROVIDER' | 'YOUTUBE_DATA_API_KEY';
+export type TranscriptEmotionProviderMode = (typeof TRANSCRIPT_EMOTION_PROVIDER_MODES)[number];
+export type AudioEmotionProviderMode = (typeof AUDIO_EMOTION_PROVIDER_MODES)[number];
+export type RuntimeConfigField =
+  | 'DISCOVERY_PROVIDER'
+  | 'TRANSCRIPT_PROVIDER'
+  | 'TRANSCRIPT_EMOTION_PROVIDER'
+  | 'AUDIO_EMOTION_PROVIDER'
+  | 'YOUTUBE_DATA_API_KEY'
+  | 'HUME_API_KEY';
 
 export interface RuntimeConfigIssue {
   field: RuntimeConfigField;
@@ -148,9 +144,25 @@ const readBooleanFlag = (value: string | undefined) => {
 export const readRuntimeConfig = (env: NodeJS.ProcessEnv = process.env) => {
   const discoveryProvider = readProviderMode(env.DISCOVERY_PROVIDER, DISCOVERY_PROVIDER_MODES, 'DISCOVERY_PROVIDER');
   const transcriptProvider = readProviderMode(env.TRANSCRIPT_PROVIDER, TRANSCRIPT_PROVIDER_MODES, 'TRANSCRIPT_PROVIDER');
+  const transcriptEmotionProvider = readProviderMode(
+    env.TRANSCRIPT_EMOTION_PROVIDER,
+    TRANSCRIPT_EMOTION_PROVIDER_MODES,
+    'TRANSCRIPT_EMOTION_PROVIDER'
+  );
+  const audioEmotionProvider = readProviderMode(
+    env.AUDIO_EMOTION_PROVIDER,
+    AUDIO_EMOTION_PROVIDER_MODES,
+    'AUDIO_EMOTION_PROVIDER'
+  );
   const youtubeDataApiKey = env.YOUTUBE_DATA_API_KEY?.trim() || '';
+  const humeApiKey = env.HUME_API_KEY?.trim() || '';
   const providerConfigIssues = [discoveryProvider.issue, transcriptProvider.issue].filter(
     (issue): issue is RuntimeConfigIssue => Boolean(issue)
+  );
+  providerConfigIssues.push(
+    ...[transcriptEmotionProvider.issue, audioEmotionProvider.issue].filter(
+      (issue): issue is RuntimeConfigIssue => Boolean(issue)
+    )
   );
 
   if (discoveryProvider.mode === 'youtube-data-api' && !youtubeDataApiKey) {
@@ -160,11 +172,28 @@ export const readRuntimeConfig = (env: NodeJS.ProcessEnv = process.env) => {
     });
   }
 
+  if (audioEmotionProvider.mode === 'hume-expression-measurement' && !humeApiKey) {
+    providerConfigIssues.push({
+      field: 'HUME_API_KEY',
+      message: 'HUME_API_KEY is required when AUDIO_EMOTION_PROVIDER=hume-expression-measurement'
+    });
+  }
+
   return {
     discoveryProvider: discoveryProvider.mode,
     transcriptProvider: transcriptProvider.mode,
+    transcriptEmotionProvider: transcriptEmotionProvider.mode,
+    audioEmotionProvider: audioEmotionProvider.mode,
     youtubeDataApiKey,
+    humeApiKey,
+    humeApiBaseUrl: env.HUME_API_BASE_URL?.trim() || 'https://api.hume.ai/v0/batch/jobs',
+    humeModelVersion: env.HUME_MODEL_VERSION?.trim() || 'prosody-v1',
+    humeRequestTimeoutMs: readPositiveInteger(env.HUME_REQUEST_TIMEOUT_MS, 8_000),
+    humePollIntervalMs: readPositiveInteger(env.HUME_POLL_INTERVAL_MS, 350),
+    humeMaxPollAttempts: readPositiveInteger(env.HUME_MAX_POLL_ATTEMPTS, 3),
     transcriptCacheTtlMs: readPositiveInteger(env.TRANSCRIPT_CACHE_TTL_MS, APP_CONFIG.transcript.cacheTtlMs),
+    audioCacheTtlMs: readPositiveInteger(env.AUDIO_CACHE_TTL_MS, 30 * 60 * 1000),
+    ensembleCacheTtlMs: readPositiveInteger(env.ENSEMBLE_CACHE_TTL_MS, 10 * 60 * 1000),
     trustProxyHeaders: readBooleanFlag(env.TRUST_PROXY_HEADERS),
     providerConfigIssues,
     hasProviderConfigIssues: providerConfigIssues.length > 0
@@ -174,3 +203,33 @@ export const readRuntimeConfig = (env: NodeJS.ProcessEnv = process.env) => {
 export type RuntimeConfig = ReturnType<typeof readRuntimeConfig>;
 
 export const RUNTIME_CONFIG = readRuntimeConfig();
+
+export const buildScoringConfigHash = (overrides: {
+  transcriptEmotionProviderHash?: string;
+  audioEmotionProviderHash?: string;
+  transcriptEmotionProviderName?: string | null;
+  audioEmotionProviderName?: string | null;
+  humeApiBaseUrl?: string;
+  humeModelVersion?: string;
+} = {}) => {
+  const scoringHashSource = {
+    transcript_emotion_model: APP_CONFIG.scoring.transcriptEmotionModel,
+    fusion_weights: APP_CONFIG.scoring.fusionWeights,
+    quality_penalty_weights: APP_CONFIG.scoring.qualityPenaltyWeights,
+    windowing_parameters: APP_CONFIG.windowing,
+    language_handling_mode: 'single-active-language',
+    hume_model_and_configuration_identifiers: APP_CONFIG.scoring.hume,
+    runtime_scoring_provider_identifiers: {
+      transcriptEmotionProvider: overrides.transcriptEmotionProviderName ?? RUNTIME_CONFIG.transcriptEmotionProvider ?? 'unset',
+      audioEmotionProvider: overrides.audioEmotionProviderName ?? RUNTIME_CONFIG.audioEmotionProvider ?? 'unset',
+      humeApiBaseUrl: overrides.humeApiBaseUrl ?? RUNTIME_CONFIG.humeApiBaseUrl,
+      humeModelVersion: overrides.humeModelVersion ?? RUNTIME_CONFIG.humeModelVersion,
+      transcriptEmotionProviderHash: overrides.transcriptEmotionProviderHash ?? 'unset',
+      audioEmotionProviderHash: overrides.audioEmotionProviderHash ?? 'unset'
+    }
+  };
+
+  return createHash('sha1').update(JSON.stringify(scoringHashSource)).digest('hex').slice(0, 12);
+};
+
+export const SCORING_CONFIG_HASH = buildScoringConfigHash();

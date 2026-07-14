@@ -1,0 +1,152 @@
+metadata:
+  execution_id: EXE-0006
+  title: Real deterministic scoring ensemble
+  status: completed
+  owners:
+    - engineering
+    - qa_security
+    - orchestrator
+  directive_refs:
+    - DIR-0001
+  last_updated: 2026-07-13
+
+scope:
+  objective: Replace heuristic scoring with a real deterministic scoring path using transcript emotion and Hume audio emotion while preserving current client contracts and bounded compute behavior.
+  in_scope:
+    - real transcript-emotion scorer integration with pinned model and version behavior
+    - Hume Expression Measurement API integration for selected candidate windows
+    - deterministic fusion using the existing viralScore formula, precision handling, tie-break order, and scoringConfigHash rules
+    - Layer B audio cache and in-flight coalescing, plus minimal Layer C ensemble caching if needed for determinism or cost control
+    - explicit degraded and failure behavior for Hume and transcript-emotion provider issues
+    - regression coverage for determinism, provider failure modes, and score normalization
+  out_of_scope:
+    - discovery or transcript provider redesign
+    - candidate windowing redesign
+    - rendered fallback redesign
+    - UI or UX changes beyond contract compatibility
+    - multi-provider experimentation or non-deterministic ranking behavior
+
+handoff:
+  owners:
+    orchestrator: DOE Orchestrator
+    project_manager: DOE Project Manager
+    ux_ui: N/A
+    engineering: DOE Full Stack Delivery
+    qa_security: DOE QA Security
+    ci_enforcement: N/A
+  acceptance_criteria:
+    - Strict MVP scoring path no longer uses seeded or mock audio scoring or heuristic-only emotion scoring.
+    - Same inputs plus same scoringConfigHash produce identical rounded component scores, selected top window IDs, and final ordering.
+    - Hume calls are bounded by job caps, cached by window signature plus Hume config hash, and coalesced for duplicate in-flight work.
+    - Missing or invalid Hume or transcript-emotion configuration fails closed; timeout, quota, or malformed payloads produce explicit degraded or failed job outcomes without hanging.
+    - GET /jobs/{jobId} and GET /jobs/{jobId}/clips payload shapes remain unchanged while viralScore reflects real ensemble output.
+    - Logs and metrics capture scoring-stage failures, cache behavior, and stage duration without leaking secrets or raw provider payloads.
+  risk_tier: high
+  risk_rationale: This slice adds external scoring dependencies, cost and quota risk, and determinism sensitivity to the MVP critical path.
+  threat_or_abuse_assumptions:
+    - missing or invalid provider configuration must not silently widen to mock behavior
+    - repeated searches may attempt to force excessive Hume compute without proper caps and coalescing
+    - malformed or out-of-range provider payloads must not poison cache or destabilize ranking
+  validation_plan:
+    engineering:
+      - npm run build
+      - npm test
+      - unit coverage for score mapping, rounding, tie-break ordering, and scoringConfigHash behavior
+      - integration coverage for Hume success, timeout, quota, malformed payload, and cache hit or coalescing behavior
+    qa_security:
+      - negative-path review for missing config, malformed provider payloads, quota, timeout, and no-silent-fallback behavior
+      - secret-redaction review for scoring logs and provider error handling
+    ci_enforcement:
+      - N/A until CI expansion is requested
+  release_gates:
+    - deterministic golden-path tests are green
+    - Hume and transcript-emotion failure and degraded behavior are proven
+    - cache hash invalidation and coalescing behavior are verified
+    - secrets and log redaction remain intact
+    - API contracts remain unchanged
+  rollback_expectation:
+    - revert to the current deterministic heuristic scoring path in one deploy, preserving API schemas and job polling behavior, and invalidate any new scoring caches without data migration
+
+quality_gates:
+  definition_of_ready:
+    project_manager: pass
+    ux_ui: n/a
+    qa_security: pass
+    ci_enforcement: n/a
+    notes:
+      - Trust-and-contract hardening is complete, clearing the path for scoring work.
+      - Slice remains bounded to scoring and caching behavior rather than UI or discovery redesign.
+  definition_of_done:
+    engineering: pass
+    qa_security: pass
+    ci_enforcement: n/a
+    orchestrator: pass
+    notes:
+      - Engineering implemented real Hume HTTP integration, deterministic transcript-emotion provider boundary, scoring cache controls, and regression coverage for determinism and provider failures.
+      - QA/security verified the slice with build passing and 30 of 30 tests passing, including strict fail-closed scoring config, Hume failure modes, deterministic scoring, and cache coalescing behavior.
+
+backlog:
+  items:
+    - SLICE-9-real-deterministic-scoring-ensemble
+    - mvp-scoring-ensemble-slice
+  dependencies:
+    - EXE-0001 through EXE-0005 completed on branch 2026/feat/mvp-foundation-app
+    - approved transcript-emotion provider selection
+    - Hume API runtime configuration
+
+implementation:
+  systems_touched:
+    - scoring pipeline
+    - Hume integration
+    - transcript emotion integration
+    - cache layers
+    - logging
+    - tests
+  approach:
+    - replace heuristic transcript/audio scoring with pinned provider-backed integrations
+    - normalize and round all score components before selection and sorting
+    - cache bounded Hume and ensemble outputs by deterministic keys
+    - preserve current API shapes and explicit degraded behavior for provider failures
+  preview:
+    run_command: npm run dev
+    verification: Real-provider scoring produces deterministic clip ordering or explicit degraded outcomes while existing search, polling, and clips contracts remain unchanged.
+  deployment:
+    free_host_provider: Vercel
+    steps:
+      - configure HUME_API_KEY and transcript-emotion provider settings in the host dashboard
+      - run npm run build during deployment
+      - verify scoring-stage happy path and degraded path after deploy
+  rollback:
+    - revert to the heuristic scoring implementation
+    - redeploy without changing endpoint contracts
+
+validation:
+  engineering_checks:
+    - build
+    - deterministic scoring golden tests
+    - Hume and transcript-emotion integration tests
+  qa_checks:
+    - repeated-run determinism scenarios
+    - Hume timeout, quota, malformed payload, and transcript-emotion failure scenarios
+    - API contract regression for search, job status, and clips endpoints
+  security_checks:
+    - no raw provider payload or secret leakage in logs or client responses
+    - expensive-path caps and coalescing remain enforced under abuse scenarios
+    - no silent fallback to mock scoring
+  evidence:
+    - npm run build -> pass
+    - npm test -> pass (30/30 tests)
+    - real Hume HTTP provider path implemented with explicit timeout, quota, malformed payload, and failure handling
+    - transcript-emotion provider boundary is pinned, deterministic, and included in scoringConfigHash behavior
+    - deterministic fusion, rounding, and stable tie-break ordering verified by regression coverage
+    - Layer B audio cache and Layer C ensemble cache support deterministic keys, keyword isolation, and in-flight coalescing
+    - missing or invalid scoring provider config fails closed with no silent fallback to mock scoring
+    - scoring-stage logs emit cache stats, duration, and degraded or failure signals without leaking secrets or raw provider payloads
+
+risk:
+  residual_risks:
+    - real-provider latency and quota may reduce clip yield or increase degraded outcomes
+    - live Hume compatibility was validated through provider-path tests rather than a live upstream smoke run
+    - unchanged windowing may limit quality improvements until a later slice
+    - in-memory cache behavior still differs from production-scale deployment
+  release_recommendation: go-with-risk

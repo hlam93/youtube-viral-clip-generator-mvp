@@ -38,7 +38,10 @@ export const validateKeywords = (value: unknown) => {
 
 export const hashValue = (value: string) => createHash('sha1').update(value).digest('hex').slice(0, 12);
 
-export const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+export const delay = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 export const formatSeconds = (seconds: number) => {
   const total = Math.max(0, Math.floor(seconds));

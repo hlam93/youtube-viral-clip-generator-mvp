@@ -20,11 +20,24 @@ import {
   createMockTranscriptProvider,
   type TranscriptProvider
 } from '../src/providers.js';
+import {
+  createConfiguredAudioEmotionProvider,
+  createConfiguredTranscriptEmotionProvider,
+  DeterministicAudioEmotionProvider,
+  HumeExpressionMeasurementAudioProvider,
+  PinnedTranscriptEmotionProvider,
+  type AudioEmotionProvider,
+  type TranscriptEmotionProvider
+} from '../src/scoringProviders.js';
 import { checkSearchRateLimit, resetSearchRateLimits } from '../src/rateLimit.js';
 import type { CandidateVideoLite, TranscriptCacheEntry } from '../src/types.js';
 
 const clientDir = resolve(process.cwd(), 'dist', 'client');
 const silentLogger = createStructuredLogger(() => {});
+const createTestScoringProviders = () => ({
+  transcriptEmotionProvider: new PinnedTranscriptEmotionProvider(),
+  audioEmotionProvider: new DeterministicAudioEmotionProvider()
+});
 
 const startAppServer = async (app: ReturnType<typeof createApp>) => {
   const server = app.listen(0, '127.0.0.1');
@@ -67,14 +80,41 @@ const waitForJobTerminalState = async (jobs: JobStore, jobId: string) => {
   throw new Error(`Job ${jobId} did not reach a terminal state in time`);
 };
 
+const createScoringVideo = (sourceId = 'yt-score-001'): CandidateVideoLite => ({
+  platform: 'youtube',
+  sourceId,
+  title: 'Crowd surprise turns the room electric',
+  channelName: 'Signal Lab',
+  durationSec: 180,
+  supportsTimestampPlayback: true,
+  publishDate: '2026-01-01T00:00:00Z',
+  playUrl: `https://www.youtube.com/watch?v=${sourceId}`,
+  embedUrl: `https://www.youtube.com/embed/${sourceId}`
+});
+
+const createScoringTranscript = (): TranscriptCacheEntry => ({
+  videoId: 'yt-score-001',
+  language: 'en',
+  captionTrackSignature: 'caption-sig-001',
+  coverage: 0.94,
+  timestampConfidence: 0.92,
+  boundaryUncertainty: 0.08,
+  segments: [
+    { startSec: 10, endSec: 18, text: 'The crowd gasps at the unbelievable twist and everyone starts cheering' },
+    { startSec: 32, endSec: 40, text: 'A quiet explanation follows with practical budgeting tips' }
+  ]
+});
+
 test('deterministic ranking remains stable and respects caps', async () => {
   const pipeline = createMockPipeline();
   const keywords = 'surprise speech budget hack';
 
   const discovered = await pipeline.discover(keywords);
   const contexts = await pipeline.buildContexts(discovered);
-  const firstRun = pipeline.packageClips('job-a', pipeline.selectTopWindows(await pipeline.scoreWindows(keywords, contexts)));
-  const secondRun = pipeline.packageClips('job-b', pipeline.selectTopWindows(await pipeline.scoreWindows(keywords, contexts)));
+  const firstScored = await pipeline.scoreWindows(keywords, contexts);
+  const secondScored = await pipeline.scoreWindows(keywords, contexts);
+  const firstRun = pipeline.packageClips('job-a', pipeline.selectTopWindows(firstScored.windows));
+  const secondRun = pipeline.packageClips('job-b', pipeline.selectTopWindows(secondScored.windows));
 
   assert.deepEqual(
     firstRun.map((clip) => ({ videoId: clip.videoId, start: clip.startTimeSec, end: clip.endTimeSec, score: clip.viralScore, mode: clip.mode })),
@@ -319,6 +359,7 @@ test('transcript cache reuses settled entries and coalesces concurrent requests'
   const pipeline = createPipeline({
     discoveryProvider: createMockDiscoveryProvider(),
     transcriptProvider,
+    ...createTestScoringProviders(),
     transcriptCacheTtlMs: APP_CONFIG.transcript.cacheTtlMs
   });
 
@@ -353,6 +394,7 @@ test('transcript cache expires after TTL and reloads upstream data', async () =>
   const pipeline = createPipeline({
     discoveryProvider: createMockDiscoveryProvider(),
     transcriptProvider,
+    ...createTestScoringProviders(),
     transcriptCacheTtlMs: 20
   });
 
@@ -398,7 +440,8 @@ test('malformed transcript payloads are rejected before caching and do not poiso
 
   const pipeline = createPipeline({
     discoveryProvider: createMockDiscoveryProvider(),
-    transcriptProvider
+    transcriptProvider,
+    ...createTestScoringProviders()
   });
 
   await assert.rejects(
@@ -441,13 +484,15 @@ test('pipeline preserves clip contract with an injected transcript provider', as
 
   const pipeline = createPipeline({
     discoveryProvider: { providerName: 'stub-discovery', discover: async () => [video] },
-    transcriptProvider
+    transcriptProvider,
+    ...createTestScoringProviders()
   });
 
   const contexts = await pipeline.buildContexts([video]);
+  const scored = await pipeline.scoreWindows('startup room electric', contexts);
   const clips = pipeline.packageClips(
     'job-contract',
-    pipeline.selectTopWindows(await pipeline.scoreWindows('startup room electric', contexts))
+    pipeline.selectTopWindows(scored.windows)
   );
 
   assert.ok(clips.length > 0);
@@ -485,6 +530,7 @@ test('pipeline degrades safely when one transcript request fails', async () => {
   const pipeline = createPipeline({
     discoveryProvider: createMockDiscoveryProvider(),
     transcriptProvider,
+    ...createTestScoringProviders(),
     logger: silentLogger
   });
 
@@ -517,6 +563,7 @@ test('transcript timeout failures map to explicit degraded behavior', async () =
       discover: async () => discovered.slice(0, 1)
     },
     transcriptProvider: provider,
+    ...createTestScoringProviders(),
     logger
   });
   const jobs = new JobStore({ pipeline, logger });
@@ -571,6 +618,7 @@ test('strict discovery mode never substitutes mock results on empty real discove
       logger
     ),
     transcriptProvider,
+    ...createTestScoringProviders(),
     logger
   });
   const jobs = new JobStore({ pipeline, logger });
@@ -613,6 +661,7 @@ test('strict discovery mode surfaces missing real discovery configuration withou
   const pipeline = createPipeline({
     discoveryProvider: createStrictDiscoveryProvider(new YouTubeDataDiscoveryProvider(''), logger),
     transcriptProvider: createMockTranscriptProvider(),
+    ...createTestScoringProviders(),
     logger
   });
   const jobs = new JobStore({ pipeline, logger });
@@ -972,6 +1021,7 @@ test('jobs explicitly degrade when the transcript provider cannot serve youtube-
       discover: async () => discovered.slice(0, 2)
     },
     transcriptProvider,
+    ...createTestScoringProviders(),
     logger
   });
   const jobs = new JobStore({ pipeline, logger });
@@ -1005,10 +1055,16 @@ test('jobs explicitly degrade when the transcript provider cannot serve youtube-
 test('configured providers fail closed for invalid or missing provider modes', () => {
   const invalidDiscoveryConfig = readRuntimeConfig({
     DISCOVERY_PROVIDER: 'surprise-mode',
-    TRANSCRIPT_PROVIDER: 'mock'
+    TRANSCRIPT_PROVIDER: 'mock',
+    TRANSCRIPT_EMOTION_PROVIDER: 'pinned-local-model',
+    AUDIO_EMOTION_PROVIDER: 'hume-expression-measurement',
+    HUME_API_KEY: 'test-hume-key'
   });
   const missingTranscriptConfig = readRuntimeConfig({
-    DISCOVERY_PROVIDER: 'mock'
+    DISCOVERY_PROVIDER: 'mock',
+    TRANSCRIPT_EMOTION_PROVIDER: 'pinned-local-model',
+    AUDIO_EMOTION_PROVIDER: 'hume-expression-measurement',
+    HUME_API_KEY: 'test-hume-key'
   });
 
   assert.equal(invalidDiscoveryConfig.hasProviderConfigIssues, true);
@@ -1026,6 +1082,9 @@ test('configured discovery provider rejects real mode without the required secre
   const missingSecretConfig = readRuntimeConfig({
     DISCOVERY_PROVIDER: 'youtube-data-api',
     TRANSCRIPT_PROVIDER: 'mock',
+    TRANSCRIPT_EMOTION_PROVIDER: 'pinned-local-model',
+    AUDIO_EMOTION_PROVIDER: 'hume-expression-measurement',
+    HUME_API_KEY: 'test-hume-key',
     YOUTUBE_DATA_API_KEY: '   '
   });
 
@@ -1033,6 +1092,356 @@ test('configured discovery provider rejects real mode without the required secre
     () => createConfiguredDiscoveryProvider(silentLogger, missingSecretConfig),
     (error) => error instanceof ProviderConfigError && /YOUTUBE_DATA_API_KEY/.test(error.message)
   );
+});
+
+test('configured scoring providers fail closed when transcript-emotion or hume config is missing', () => {
+  const missingTranscriptEmotionMode = readRuntimeConfig({
+    DISCOVERY_PROVIDER: 'mock',
+    TRANSCRIPT_PROVIDER: 'mock',
+    AUDIO_EMOTION_PROVIDER: 'hume-expression-measurement',
+    HUME_API_KEY: 'test-hume-key'
+  });
+  const missingHumeKey = readRuntimeConfig({
+    DISCOVERY_PROVIDER: 'mock',
+    TRANSCRIPT_PROVIDER: 'mock',
+    TRANSCRIPT_EMOTION_PROVIDER: 'pinned-local-model',
+    AUDIO_EMOTION_PROVIDER: 'hume-expression-measurement',
+    HUME_API_KEY: '   '
+  });
+
+  assert.throws(
+    () => createConfiguredTranscriptEmotionProvider(missingTranscriptEmotionMode),
+    (error) => error instanceof ProviderConfigError && /TRANSCRIPT_EMOTION_PROVIDER/.test(error.message)
+  );
+  assert.throws(
+    () => createConfiguredAudioEmotionProvider(missingHumeKey),
+    (error) => error instanceof ProviderConfigError && /HUME_API_KEY/.test(error.message)
+  );
+});
+
+test('hume audio provider maps successful predictions into deterministic audio emotion output', async () => {
+  const fetchCalls: Array<{ url: string; method: string; body?: unknown }> = [];
+  const provider = new HumeExpressionMeasurementAudioProvider('test-hume-key', {
+    modelVersion: 'prosody-test-v1',
+    fetchImpl: async (input: string | URL | Request, init?: RequestInit) => {
+      fetchCalls.push({
+        url: String(input),
+        method: init?.method ?? 'GET',
+        body: init?.body ? JSON.parse(String(init.body)) : undefined
+      });
+
+      if ((init?.method ?? 'GET') === 'POST') {
+        return {
+          ok: true,
+          async json() {
+            return { job_id: 'job-hume-1' };
+          }
+        } as Response;
+      }
+
+      return {
+        ok: true,
+        async json() {
+          return {
+            state: 'completed',
+            results: {
+              predictions: [
+                {
+                  models: {
+                    prosody: {
+                      grouped_predictions: [
+                        {
+                          predictions: [
+                            {
+                              emotions: [
+                                { name: 'Surprise', score: 0.91 },
+                                { name: 'Joy', score: 0.63 }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          };
+        }
+      } as Response;
+    }
+  });
+
+  const output = await provider.scoreWindow({
+    video: createScoringVideo(),
+    transcript: createScoringTranscript(),
+    windowBoundarySignature: '0:10:40',
+    startTimeSec: 10,
+    endTimeSec: 40,
+    text: 'The crowd gasps at the unbelievable twist'
+  });
+
+  assert.equal(output.dominantEmotion, 'surprise');
+  assert.equal(output.audioIntensity, 0.91);
+  assert.deepEqual(output.audioEmotionOutputs, [
+    { name: 'surprise', score: 0.91 },
+    { name: 'joy', score: 0.63 }
+  ]);
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(fetchCalls[0]?.method, 'POST');
+  assert.equal(fetchCalls[1]?.method, 'GET');
+  assert.match(String(fetchCalls[0]?.body && JSON.stringify(fetchCalls[0].body)), /prosody-test-v1/);
+});
+
+test('hume audio provider surfaces timeout quota failure and malformed payload paths', async () => {
+  const baseInput = {
+    video: createScoringVideo(),
+    transcript: createScoringTranscript(),
+    windowBoundarySignature: '0:10:40',
+    startTimeSec: 10,
+    endTimeSec: 40,
+    text: 'The crowd gasps at the unbelievable twist'
+  };
+
+  await assert.rejects(
+    () =>
+      new HumeExpressionMeasurementAudioProvider('test-hume-key', {
+        timeoutMs: 25,
+        fetchImpl: async (_input: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              const aborted = new Error('Request aborted');
+              aborted.name = 'AbortError';
+              reject(aborted);
+            });
+          })
+      }).scoreWindow(baseInput),
+    (error: unknown) =>
+      error instanceof ProviderError &&
+      error.providerName === 'hume-expression-measurement' &&
+      error.reason === 'timeout'
+  );
+
+  await assert.rejects(
+    () =>
+      new HumeExpressionMeasurementAudioProvider('test-hume-key', {
+        fetchImpl: async () =>
+          ({
+            ok: false,
+            status: 429,
+            async json() {
+              return { error: { message: 'quota exceeded' } };
+            }
+          }) as Response
+      }).scoreWindow(baseInput),
+    (error: unknown) =>
+      error instanceof ProviderError &&
+      error.providerName === 'hume-expression-measurement' &&
+      error.reason === 'quota_exceeded'
+  );
+
+  const genericFailureProvider = new HumeExpressionMeasurementAudioProvider('test-hume-key', {
+    fetchImpl: async () =>
+      ({
+        ok: false,
+        status: 500,
+        async json() {
+          return { error: { message: 'server exploded' } };
+        }
+      }) as Response
+  });
+  await assert.rejects(
+    () => genericFailureProvider.scoreWindow(baseInput),
+    (error: unknown) =>
+      error instanceof ProviderError &&
+      error.providerName === 'hume-expression-measurement' &&
+      error.reason === 'failure'
+  );
+
+  let malformedCall = 0;
+  const malformedProvider = new HumeExpressionMeasurementAudioProvider('test-hume-key', {
+    fetchImpl: async () => {
+      malformedCall += 1;
+      if (malformedCall === 1) {
+        return {
+          ok: true,
+          async json() {
+            return { job_id: 'job-hume-malformed' };
+          }
+        } as Response;
+      }
+
+      return {
+        ok: true,
+        async json() {
+          return { state: 'completed', results: { predictions: [] } };
+        }
+      } as Response;
+    }
+  });
+  await assert.rejects(
+    () => malformedProvider.scoreWindow(baseInput),
+    (error: unknown) =>
+      error instanceof ProviderError &&
+      error.providerName === 'hume-expression-measurement' &&
+      error.reason === 'malformed_payload'
+  );
+});
+
+test('scoring degrades explicitly when transcript emotion scoring fails', async () => {
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = createStructuredLogger((entry) => logs.push(entry));
+  const video = createScoringVideo();
+  const transcript = createScoringTranscript();
+  transcript.videoId = video.sourceId;
+  const transcriptProvider: TranscriptProvider = {
+    providerName: 'fixed-transcript',
+    getCacheKey(targetVideo, language) {
+      return `yt:${targetVideo.sourceId}:${language}:fixed-transcript`;
+    },
+    async getTranscript() {
+      return transcript;
+    }
+  };
+  const transcriptEmotionProvider: TranscriptEmotionProvider = {
+    providerName: 'failing-transcript-emotion',
+    configHash: 'fail-transcript-emotion-v1',
+    async scoreText() {
+      throw new ProviderError('failing-transcript-emotion', 'failure', 'Transcript emotion scoring failed');
+    }
+  };
+
+  const pipeline = createPipeline({
+    discoveryProvider: { providerName: 'stub-discovery', discover: async () => [video] },
+    transcriptProvider,
+    transcriptEmotionProvider,
+    audioEmotionProvider: new DeterministicAudioEmotionProvider(),
+    logger
+  });
+  const jobs = new JobStore({ pipeline, logger });
+
+  const created = jobs.createJob('crowd surprise');
+  const job = await waitForJobTerminalState(jobs, created.jobId);
+
+  assert.equal(job.status, 'degraded');
+  assert.equal(job.clips.length, 0);
+  assert.ok(
+    logs.some(
+      (entry) =>
+        entry.event === 'provider_failure' &&
+        entry.stage === 'scoring' &&
+        entry.provider === 'failing-transcript-emotion'
+    )
+  );
+  assert.ok(
+    logs.some(
+      (entry) =>
+        entry.event === 'provider_degraded' &&
+        entry.stage === 'scoring' &&
+        entry.reason === 'partial_scoring_coverage'
+    )
+  );
+});
+
+test('scoring stays deterministic across runs and does not reuse ensemble cache across keywords', async () => {
+  const video = createScoringVideo();
+  const transcript = createScoringTranscript();
+  transcript.videoId = video.sourceId;
+  const transcriptProvider: TranscriptProvider = {
+    providerName: 'fixed-transcript',
+    getCacheKey(targetVideo, language) {
+      return `yt:${targetVideo.sourceId}:${language}:fixed-transcript`;
+    },
+    async getTranscript() {
+      return transcript;
+    }
+  };
+  const audioEmotionProvider: AudioEmotionProvider = new DeterministicAudioEmotionProvider('cache-key-test-v1');
+  const pipeline = createPipeline({
+    discoveryProvider: { providerName: 'stub-discovery', discover: async () => [video] },
+    transcriptProvider,
+    transcriptEmotionProvider: new PinnedTranscriptEmotionProvider(),
+    audioEmotionProvider
+  });
+  const contexts = await pipeline.buildContexts([video]);
+
+  const first = await pipeline.scoreWindows('crowd surprise', contexts);
+  const second = await pipeline.scoreWindows('crowd surprise', contexts);
+  const third = await pipeline.scoreWindows('budgeting tips', contexts);
+
+  assert.equal(first.degraded, false);
+  assert.deepEqual(
+    first.windows.map((window) => ({
+      windowId: window.windowId,
+      score: window.viralScore,
+      transcriptEmotionScore: window.transcriptEmotionScore,
+      audioIntensity: window.audioIntensity
+    })),
+    second.windows.map((window) => ({
+      windowId: window.windowId,
+      score: window.viralScore,
+      transcriptEmotionScore: window.transcriptEmotionScore,
+      audioIntensity: window.audioIntensity
+    }))
+  );
+  assert.notDeepEqual(
+    first.windows.map((window) => window.relevanceScore),
+    third.windows.map((window) => window.relevanceScore)
+  );
+  assert.equal(pipeline.scoringConfigHash.length, 12);
+});
+
+test('audio and ensemble caching coalesce in-flight scoring and reuse settled results', async () => {
+  const video = createScoringVideo('yt-cache-001');
+  const transcript = createScoringTranscript();
+  transcript.videoId = video.sourceId;
+  transcript.captionTrackSignature = 'caption-cache-001';
+  transcript.segments = [transcript.segments[0]!];
+  const transcriptProvider: TranscriptProvider = {
+    providerName: 'fixed-transcript',
+    getCacheKey(targetVideo, language) {
+      return `yt:${targetVideo.sourceId}:${language}:fixed-transcript`;
+    },
+    async getTranscript() {
+      return transcript;
+    }
+  };
+
+  let audioCalls = 0;
+  const audioEmotionProvider: AudioEmotionProvider = {
+    providerName: 'counting-audio',
+    configHash: 'counting-audio-v1',
+    async scoreWindow() {
+      audioCalls += 1;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+      return {
+        dominantEmotion: 'surprise',
+        audioIntensity: 0.88,
+        humeConfigHash: 'counting-audio-v1',
+        audioEmotionOutputs: [{ name: 'surprise', score: 0.88 }]
+      };
+    }
+  };
+
+  const pipeline = createPipeline({
+    discoveryProvider: { providerName: 'stub-discovery', discover: async () => [video] },
+    transcriptProvider,
+    transcriptEmotionProvider: new PinnedTranscriptEmotionProvider(),
+    audioEmotionProvider,
+    audioCacheTtlMs: 5_000,
+    ensembleCacheTtlMs: 5_000
+  });
+  const contexts = await pipeline.buildContexts([video]);
+
+  const [first, second] = await Promise.all([
+    pipeline.scoreWindows('crowd surprise', contexts),
+    pipeline.scoreWindows('crowd surprise', contexts)
+  ]);
+  const third = await pipeline.scoreWindows('crowd surprise', contexts);
+
+  assert.equal(audioCalls, 1);
+  assert.deepEqual(first.windows, second.windows);
+  assert.deepEqual(second.windows, third.windows);
 });
 
 test('job status and clip routes require the creating anonymous token and hide cross-job access', async () => {
