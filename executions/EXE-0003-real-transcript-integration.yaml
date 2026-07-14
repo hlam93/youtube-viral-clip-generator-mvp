@@ -1,0 +1,149 @@
+metadata:
+  execution_id: EXE-0003
+  title: Real transcript integration and defensive coverage
+  status: completed
+  owners:
+    - engineering
+    - qa_security
+    - orchestrator
+  directive_refs:
+    - DIR-0001
+  last_updated: 2026-07-13
+
+scope:
+  objective: Turn youtube-captions mode into a real transcript retrieval path while preserving explicit degraded behavior and adding automated abuse-case coverage for transcript faults and proxy-spoofing handling.
+  in_scope:
+    - real server-side transcript retrieval for TRANSCRIPT_PROVIDER=youtube-captions
+    - transcript normalization into the existing TranscriptCacheEntry contract
+    - explicit degraded handling for no-caption, timeout, malformed transcript, and upstream failure cases
+    - automated coverage for provider timeout, malformed transcript payloads, and proxy-spoofing behavior
+    - minimal runtime and README updates required for safe operation
+  out_of_scope:
+    - scoring or windowing redesign
+    - UI changes
+    - rendered fallback work
+    - multi-language transcript expansion
+    - auth redesign beyond proxy-spoofing coverage
+
+handoff:
+  owners:
+    orchestrator: DOE Orchestrator
+    project_manager: DOE Project Manager
+    ux_ui: N/A
+    engineering: DOE Full Stack Delivery
+    qa_security: DOE QA Security
+    ci_enforcement: N/A
+  acceptance_criteria:
+    - With TRANSCRIPT_PROVIDER=youtube-captions, captioned videos can produce real transcript segments in the existing pipeline contract.
+    - Missing captions or upstream transcript failures degrade explicitly without silent mock substitution or hung jobs.
+    - Transcript payloads are validated before use or caching and malformed payloads do not poison cache state.
+    - Provider calls are time-bounded and map timeout failures to observable degraded behavior.
+    - Automated tests cover transcript timeout, malformed transcript payloads, and proxy-spoofing behavior with trust proxy on and off.
+    - Existing mock transcript mode and current API/UI contracts remain green.
+  risk_tier: high
+  risk_rationale: This slice introduces live transcript payload handling and abuse-case coverage at a sensitive ingestion boundary that affects determinism, cache safety, and cost control.
+  threat_or_abuse_assumptions:
+    - malformed or oversized transcript payloads may attempt to crash parsing or poison cache entries
+    - spoofed forwarded headers may attempt to bypass IP-based rate limiting or distort observability
+    - upstream timeout or no-caption cases must not hang jobs or leak sensitive provider detail
+  validation_plan:
+    engineering:
+      - npm run build
+      - npm test
+      - integration tests for successful transcript ingestion, timeout degradation, malformed transcript rejection, and proxy header handling
+    qa_security:
+      - negative-path review for malformed transcript classes, cache poisoning prevention, timeout mapping, and proxy-spoofing handling
+      - secret-redaction review for transcript and provider error logging
+    ci_enforcement:
+      - N/A until CI expansion is requested
+  release_gates:
+    - real transcript mode is implemented and exercised in automated tests
+    - malformed transcript and timeout handling degrade safely and observably
+    - proxy-spoofing tests pass with trust proxy on and off
+    - API contracts remain unchanged
+    - mock-mode rollback remains available
+  rollback_expectation:
+    - switch environments back to TRANSCRIPT_PROVIDER=mock if real transcript mode misbehaves
+    - if needed, revert code without changing API contracts or stored job data
+
+quality_gates:
+  definition_of_ready:
+    project_manager: pass
+    ux_ui: n/a
+    qa_security: pass
+    ci_enforcement: n/a
+    notes:
+      - EXE-0002 residual risk explicitly feeds this slice.
+      - Scope is backend-focused and preserves current UI and API contracts.
+  definition_of_done:
+    engineering: pass
+    qa_security: pass
+    ci_enforcement: n/a
+    orchestrator: pass
+    notes:
+      - Engineering implemented a real youtube-captions retrieval path, transcript validation, timeout handling, and additional abuse-case regression coverage.
+      - QA/security verified the slice with build passing and 16 of 16 tests passing, including malformed transcript rejection, timeout degradation, and proxy-spoofing coverage.
+
+backlog:
+  items:
+    - SLICE-6-real-youtube-captions-integration
+    - mvp-real-transcript-integration
+  dependencies:
+    - EXE-0002 committed on branch 2026/feat/mvp-foundation-app
+    - existing provider boundary, cache layer, and auth/logging hardening
+
+implementation:
+  systems_touched:
+    - transcript provider
+    - cache layer
+    - job orchestrator
+    - request security tests
+    - logging
+    - tests
+  approach:
+    - integrate a real server-side transcript retrieval path behind the existing provider abstraction
+    - validate and normalize transcript payloads before caching or scoring
+    - preserve explicit degraded behavior for missing captions and upstream failures
+    - add abuse-case regression coverage for transcript faults and proxy-spoofing handling
+  preview:
+    run_command: npm run dev
+    verification: Transcript mode can retrieve usable captions for captioned videos or degrade explicitly with structured logs, while current search and clip contracts remain unchanged.
+  deployment:
+    free_host_provider: Vercel
+    steps:
+      - configure transcript-provider runtime settings and existing secrets in the host dashboard
+      - run npm run build during deployment
+      - verify captioned and no-caption search flows after deploy
+  rollback:
+    - revert to TRANSCRIPT_PROVIDER=mock
+    - redeploy without changing client contracts
+
+validation:
+  engineering_checks:
+    - build
+    - transcript provider integration tests
+    - proxy-spoofing and timeout regression tests
+  qa_checks:
+    - real transcript success and no-caption degraded scenarios
+    - malformed transcript rejection scenarios
+    - API contract regression for search, job status, and clips endpoints
+  security_checks:
+    - no transcript payload or provider secret leakage in logs or client responses
+    - malformed transcript data does not poison cache
+    - spoofed proxy headers do not weaken guardrails by default
+  evidence:
+    - npm run build -> pass
+    - npm test -> pass (16/16 tests)
+    - real youtube-captions transcript retrieval path verified through controlled provider tests
+    - malformed transcript payload rejection verified before cache persistence or reuse
+    - timeout failures verified to degrade explicitly with observable provider_failure and provider_degraded behavior
+    - proxy-spoofing coverage verified with trust proxy disabled and enabled
+    - existing API and clip contract regression coverage remained green
+
+risk:
+  residual_risks:
+    - no live outbound YouTube verification was exercised in this slice; behavior still depends on upstream watch-page and caption endpoint stability
+    - upstream caption coverage may remain inconsistent by video
+    - transcript-provider library behavior may vary across hosting environments
+    - in-memory cache and rate limiting may still differ from production-scale deployments
+  release_recommendation: go

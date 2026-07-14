@@ -9,6 +9,7 @@ import { createStructuredLogger } from '../src/logging.js';
 import { createMockPipeline, createPipeline } from '../src/pipeline.js';
 import {
   ProviderError,
+  YouTubeCaptionsTranscriptProvider,
   YouTubeDataDiscoveryProvider,
   createMockDiscoveryProvider,
   createMockTranscriptProvider,
@@ -151,6 +152,58 @@ test('real YouTube discovery provider maps API payloads into stable candidate vi
   ]);
 });
 
+test('real YouTube transcript provider maps caption payloads into normalized transcript segments', async () => {
+  const fetchCalls: string[] = [];
+  const provider = new YouTubeCaptionsTranscriptProvider(async (input: string | URL | Request) => {
+    const url = String(input);
+    fetchCalls.push(url);
+
+    if (url.includes('/watch?')) {
+      return {
+        ok: true,
+        async text() {
+          return `<!doctype html><script>var ytInitialPlayerResponse = {"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[{"baseUrl":"https://www.youtube.com/api/timedtext?v=video-a&lang=en","languageCode":"en","vssId":".en"}]}}};</script>`;
+        }
+      } as Response;
+    }
+
+    return {
+      ok: true,
+      async text() {
+        return '<?xml version="1.0" encoding="utf-8" ?><transcript><text start="0.5" dur="2.5">Hello &amp; welcome</text><text start="3.25" dur="1.75">Big finish</text></transcript>';
+      }
+    } as Response;
+  });
+
+  const transcript = await provider.getTranscript(
+    {
+      platform: 'youtube',
+      sourceId: 'video-a',
+      title: 'Alpha title',
+      channelName: 'Channel A',
+      durationSec: 20,
+      publishDate: '2026-01-01T00:00:00Z',
+      supportsTimestampPlayback: true,
+      playUrl: 'https://www.youtube.com/watch?v=video-a',
+      embedUrl: 'https://www.youtube.com/embed/video-a'
+    },
+    'en'
+  );
+
+  assert.deepEqual(fetchCalls, [
+    'https://www.youtube.com/watch?v=video-a&hl=en',
+    'https://www.youtube.com/api/timedtext?v=video-a&lang=en'
+  ]);
+  assert.ok(transcript);
+  assert.deepEqual(transcript.segments, [
+    { startSec: 0.5, endSec: 3, text: 'Hello & welcome' },
+    { startSec: 3.25, endSec: 5, text: 'Big finish' }
+  ]);
+  assert.equal(transcript.videoId, 'video-a');
+  assert.equal(transcript.language, 'en');
+  assert.ok(transcript.coverage > 0);
+});
+
 test('transcript cache reuses settled entries and coalesces concurrent requests', async () => {
   const discovered = await createMockDiscoveryProvider().discover('surprise speech budget hack');
   const video = discovered[0];
@@ -165,7 +218,7 @@ test('transcript cache reuses settled entries and coalesces concurrent requests'
     },
     async getTranscript(targetVideo, language) {
       upstreamCalls += 1;
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
       const transcript = await createMockTranscriptProvider().getTranscript(targetVideo, language);
       assert.ok(transcript);
       return transcript;
@@ -213,9 +266,61 @@ test('transcript cache expires after TTL and reloads upstream data', async () =>
   });
 
   await pipeline.getTranscript(video);
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 30));
   await pipeline.getTranscript(video);
 
+  assert.equal(upstreamCalls, 2);
+});
+
+test('malformed transcript payloads are rejected before caching and do not poison cache state', async () => {
+  const discovered = await createMockDiscoveryProvider().discover('surprise speech budget hack');
+  const video = discovered[0];
+  assert.ok(video);
+
+  let upstreamCalls = 0;
+
+  const transcriptProvider: TranscriptProvider = {
+    providerName: 'malformed-then-valid',
+    getCacheKey(targetVideo, language) {
+      return `yt:${targetVideo.sourceId}:${language}:malformed-then-valid`;
+    },
+    async getTranscript(targetVideo, language) {
+      upstreamCalls += 1;
+
+      if (upstreamCalls === 1) {
+        return {
+          videoId: targetVideo.sourceId,
+          language,
+          captionTrackSignature: 'bad-payload',
+          segments: [{ startSec: 8, endSec: 4, text: 'broken timings' }],
+          coverage: 0.5,
+          timestampConfidence: 0.9,
+          boundaryUncertainty: 0.1
+        };
+      }
+
+      const transcript = await createMockTranscriptProvider().getTranscript(targetVideo, language);
+      assert.ok(transcript);
+      return transcript;
+    }
+  };
+
+  const pipeline = createPipeline({
+    discoveryProvider: createMockDiscoveryProvider(),
+    transcriptProvider
+  });
+
+  await assert.rejects(
+    () => pipeline.getTranscript(video),
+    (error: unknown) =>
+      error instanceof ProviderError &&
+      error.providerName === 'malformed-then-valid' &&
+      error.reason === 'failure' &&
+      error.message === `Malformed transcript payload for ${video.sourceId}`
+  );
+
+  const transcript = await pipeline.getTranscript(video);
+  assert.ok(transcript);
   assert.equal(upstreamCalls, 2);
 });
 
@@ -296,6 +401,58 @@ test('pipeline degrades safely when one transcript request fails', async () => {
 
   assert.equal(contexts.length, 1);
   assert.equal(contexts[0]?.video.sourceId, discovered[1]?.sourceId);
+});
+
+test('transcript timeout failures map to explicit degraded behavior', async () => {
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = createStructuredLogger((entry) => logs.push(entry));
+  const discovered = await createMockDiscoveryProvider().discover('surprise speech budget hack');
+
+  const provider = new YouTubeCaptionsTranscriptProvider(
+    async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          const aborted = new Error('Request aborted');
+          aborted.name = 'AbortError';
+          reject(aborted);
+        });
+      }),
+    25
+  );
+
+  const pipeline = createPipeline({
+    discoveryProvider: {
+      providerName: 'stub-discovery',
+      discover: async () => discovered.slice(0, 1)
+    },
+    transcriptProvider: provider,
+    logger
+  });
+  const jobs = new JobStore({ pipeline, logger });
+
+  const created = jobs.createJob('surprise speech budget hack');
+  const job = await waitForJobTerminalState(jobs, created.jobId);
+
+  assert.equal(job.status, 'degraded');
+  assert.equal(job.clips.length, 0);
+  assert.ok(
+    logs.some(
+      (entry) =>
+        entry.event === 'provider_failure' &&
+        entry.jobId === created.jobId &&
+        entry.stage === 'transcript' &&
+        entry.provider === 'youtube-captions' &&
+        entry.reason === 'timeout'
+    )
+  );
+  assert.ok(
+    logs.some(
+      (entry) =>
+        entry.event === 'provider_degraded' &&
+        entry.jobId === created.jobId &&
+        entry.reason === 'no_transcripts_available'
+    )
+  );
 });
 
 test('search rejects missing, blank, and malformed anonymous tokens before job creation', async () => {
@@ -474,6 +631,125 @@ test('search logs guardrail triggers when the per-ip limit is exceeded', async (
           entry.limitedBy === 'ip'
       )
     );
+  } finally {
+    await server.close();
+  }
+});
+
+test('search ignores spoofed forwarded headers when trust proxy is disabled', async () => {
+  resetSearchRateLimits();
+
+  const rawToken = '123e4567-e89b-42d3-a456-426614174004';
+  const jobs = {
+    createJob() {
+      return { jobId: 'job-spoof-off' };
+    },
+    getJob: () => null,
+    getClips: () => null,
+    findClip: () => null
+  };
+
+  const server = await startAppServer(createApp(clientDir, jobs, { logger: silentLogger, trustProxyHeaders: false }));
+
+  try {
+    for (let index = 0; index < APP_CONFIG.rateLimits.searchPerMinutePerIp; index += 1) {
+      const response = await fetch(`${server.baseUrl}/search`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-anon-token': rawToken,
+          'x-forwarded-for': `198.51.100.${index + 1}`
+        },
+        body: JSON.stringify({ keywords: 'budget hack' })
+      });
+      assert.equal(response.status, 202);
+    }
+
+    const limitedResponse = await fetch(`${server.baseUrl}/search`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-anon-token': rawToken,
+        'x-forwarded-for': '203.0.113.99'
+      },
+      body: JSON.stringify({ keywords: 'budget hack' })
+    });
+
+    assert.equal(limitedResponse.status, 429);
+  } finally {
+    await server.close();
+  }
+});
+
+test('search respects forwarded headers only when trust proxy is enabled', async () => {
+  resetSearchRateLimits();
+
+  const rawToken = '123e4567-e89b-42d3-a456-426614174005';
+  const jobs = {
+    createJob() {
+      return { jobId: 'job-spoof-on' };
+    },
+    getJob: () => null,
+    getClips: () => null,
+    findClip: () => null
+  };
+
+  const server = await startAppServer(createApp(clientDir, jobs, { logger: silentLogger, trustProxyHeaders: true }));
+
+  try {
+    for (let index = 0; index < APP_CONFIG.rateLimits.searchPerMinutePerIp; index += 1) {
+      const response = await fetch(`${server.baseUrl}/search`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-anon-token': rawToken,
+          'x-forwarded-for': `198.51.100.${index + 1}`
+        },
+        body: JSON.stringify({ keywords: 'budget hack' })
+      });
+      assert.equal(response.status, 202);
+    }
+
+    const extraIpResponse = await fetch(`${server.baseUrl}/search`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-anon-token': rawToken,
+        'x-forwarded-for': '203.0.113.99'
+      },
+      body: JSON.stringify({ keywords: 'budget hack' })
+    });
+
+    assert.equal(extraIpResponse.status, 202);
+
+    for (
+      let index = APP_CONFIG.rateLimits.searchPerMinutePerIp + 1;
+      index < APP_CONFIG.rateLimits.searchPerMinutePerToken;
+      index += 1
+    ) {
+      const response = await fetch(`${server.baseUrl}/search`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-anon-token': rawToken,
+          'x-forwarded-for': `203.0.113.${index + 1}`
+        },
+        body: JSON.stringify({ keywords: 'budget hack' })
+      });
+      assert.equal(response.status, 202);
+    }
+
+    const tokenLimitedResponse = await fetch(`${server.baseUrl}/search`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-anon-token': rawToken,
+        'x-forwarded-for': '203.0.113.250'
+      },
+      body: JSON.stringify({ keywords: 'budget hack' })
+    });
+
+    assert.equal(tokenLimitedResponse.status, 429);
   } finally {
     await server.close();
   }

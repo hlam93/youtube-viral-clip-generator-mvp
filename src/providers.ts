@@ -2,8 +2,9 @@ import { APP_CONFIG, RUNTIME_CONFIG } from './config.js';
 import { type StructuredLogger, createStructuredLogger } from './logging.js';
 import { MOCK_VIDEO_LIBRARY } from './mockData.js';
 import { deriveRelevanceScore } from './relevance.js';
+import { MalformedTranscriptError, buildTranscriptCacheEntry } from './transcript.js';
 import type { CandidateVideoLite, TranscriptCacheEntry } from './types.js';
-import { normalizeKeywords } from './utils.js';
+import { hashValue, normalizeKeywords } from './utils.js';
 
 export interface DiscoveryProvider {
   readonly providerName: string;
@@ -47,6 +48,21 @@ interface YouTubeVideosResponse {
   }>;
 }
 
+interface YouTubeCaptionTrack {
+  baseUrl?: string;
+  languageCode?: string;
+  kind?: string;
+  vssId?: string;
+}
+
+interface YouTubePlayerResponse {
+  captions?: {
+    playerCaptionsTracklistRenderer?: {
+      captionTracks?: YouTubeCaptionTrack[];
+    };
+  };
+}
+
 const sortVideos = (left: CandidateVideoLite, right: CandidateVideoLite) => left.sourceId.localeCompare(right.sourceId);
 
 const parseIsoDuration = (value: string | undefined) => {
@@ -66,13 +82,19 @@ const parseIsoDuration = (value: string | undefined) => {
   return days * 86400 + hours * 3600 + minutes * 60 + seconds;
 };
 
-const fetchJson = async <TResponse>(url: string, providerName: string, fetchImpl: typeof fetch) => {
+const fetchUpstream = async <TResponse>(
+  url: string,
+  providerName: string,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+  parseResponse: (response: Response) => Promise<TResponse>
+) => {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 6_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetchImpl(url, {
-      headers: { accept: 'application/json' },
+      headers: { accept: 'application/json, text/plain;q=0.8, application/xml;q=0.7, text/xml;q=0.7' },
       signal: controller.signal
     });
 
@@ -80,7 +102,7 @@ const fetchJson = async <TResponse>(url: string, providerName: string, fetchImpl
       throw new ProviderError(providerName, 'failure', 'Upstream provider request failed');
     }
 
-    return (await response.json()) as TResponse;
+    return parseResponse(response);
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       throw new ProviderError(providerName, 'timeout', 'Upstream provider request timed out');
@@ -99,6 +121,20 @@ const fetchJson = async <TResponse>(url: string, providerName: string, fetchImpl
     clearTimeout(timeout);
   }
 };
+
+const fetchJson = async <TResponse>(
+  url: string,
+  providerName: string,
+  fetchImpl: typeof fetch,
+  timeoutMs: number = APP_CONFIG.transcript.providerTimeoutMs
+) => fetchUpstream(url, providerName, fetchImpl, timeoutMs, (response) => response.json() as Promise<TResponse>);
+
+const fetchText = async (
+  url: string,
+  providerName: string,
+  fetchImpl: typeof fetch,
+  timeoutMs: number = APP_CONFIG.transcript.providerTimeoutMs
+) => fetchUpstream(url, providerName, fetchImpl, timeoutMs, (response) => response.text());
 
 const toSafeErrorMessage = (error: unknown) => {
   if (error instanceof Error && error.message.trim()) {
@@ -222,19 +258,197 @@ export class YouTubeDataDiscoveryProvider implements DiscoveryProvider {
   }
 }
 
-class ExplicitDegradedTranscriptProvider implements TranscriptProvider {
+const extractJsonObject = (source: string, marker: string) => {
+  const markerIndex = source.indexOf(marker);
+  if (markerIndex < 0) {
+    return null;
+  }
+
+  const objectStart = source.indexOf('{', markerIndex + marker.length);
+  if (objectStart < 0) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = objectStart; index < source.length; index += 1) {
+    const character = source[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === '\\') {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (character === '{') {
+      depth += 1;
+      continue;
+    }
+
+    if (character !== '}') {
+      continue;
+    }
+
+    depth -= 1;
+    if (depth === 0) {
+      return source.slice(objectStart, index + 1);
+    }
+  }
+
+  return null;
+};
+
+const decodeHtmlEntities = (value: string) =>
+  value
+    .replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+
+const parseXmlAttribute = (source: string, attribute: string) => {
+  const match = new RegExp(`${attribute}="([^"]+)"`).exec(source);
+  return match?.[1] ?? null;
+};
+
+const parseTimedTextTranscript = (xml: string) => {
+  if (!/<(?:\?xml|transcript|timedtext)\b/i.test(xml)) {
+    throw new MalformedTranscriptError('Timed text payload was not XML');
+  }
+
+  const segments: TranscriptCacheEntry['segments'] = [];
+
+  for (const match of xml.matchAll(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi)) {
+    const attributes = match[1] ?? '';
+    const startRaw = parseXmlAttribute(attributes, 'start');
+    const durationRaw = parseXmlAttribute(attributes, 'dur');
+    const startSec = Number(startRaw);
+    const durationSec = Number(durationRaw);
+
+    if (!Number.isFinite(startSec) || !Number.isFinite(durationSec) || durationSec <= 0) {
+      throw new MalformedTranscriptError('Timed text segment timings were invalid');
+    }
+
+    const text = decodeHtmlEntities((match[2] ?? '').replace(/<[^>]+>/g, ' '))
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!text) {
+      continue;
+    }
+
+    segments.push({
+      startSec,
+      endSec: startSec + durationSec,
+      text
+    });
+  }
+
+  return segments;
+};
+
+const chooseCaptionTrack = (tracks: YouTubeCaptionTrack[], language: string) => {
+  const normalizedLanguage = language.trim().toLowerCase();
+  const languageRoot = normalizedLanguage.split('-')[0];
+
+  return [...tracks]
+    .filter((track) => typeof track.baseUrl === 'string' && typeof track.languageCode === 'string')
+    .map((track) => {
+      const trackLanguage = track.languageCode!.toLowerCase();
+      const score =
+        (trackLanguage === normalizedLanguage ? 100 : 0) +
+        (trackLanguage.split('-')[0] === languageRoot ? 10 : 0) +
+        (track.kind === 'asr' ? 0 : 2);
+
+      return { track, score };
+    })
+    .filter((candidate) => candidate.score >= 10)
+    .sort((left, right) => right.score - left.score || (left.track.vssId ?? '').localeCompare(right.track.vssId ?? ''))[0]
+    ?.track;
+};
+
+export class YouTubeCaptionsTranscriptProvider implements TranscriptProvider {
   readonly providerName = 'youtube-captions';
+
+  constructor(
+    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly timeoutMs: number = APP_CONFIG.transcript.providerTimeoutMs
+  ) {}
 
   getCacheKey(video: CandidateVideoLite, language: string) {
     return `yt:${video.sourceId}:${language}:youtube-captions`;
   }
 
   async getTranscript(video: CandidateVideoLite, language: string): Promise<TranscriptCacheEntry | null> {
-    throw new ProviderError(
-      this.providerName,
-      'unavailable',
-      `Transcript provider ${this.providerName} is not available for ${video.sourceId} (${language}) in this runtime`
-    );
+    const watchUrl = new URL('https://www.youtube.com/watch');
+    watchUrl.searchParams.set('v', video.sourceId);
+    watchUrl.searchParams.set('hl', language);
+
+    const watchPage = await fetchText(watchUrl.toString(), this.providerName, this.fetchImpl, this.timeoutMs);
+    const playerResponseJson =
+      extractJsonObject(watchPage, 'ytInitialPlayerResponse =') ??
+      extractJsonObject(watchPage, 'var ytInitialPlayerResponse =') ??
+      extractJsonObject(watchPage, 'window["ytInitialPlayerResponse"] =');
+
+    if (!playerResponseJson) {
+      throw new ProviderError(this.providerName, 'failure', 'Unable to read YouTube player response');
+    }
+
+    let playerResponse: YouTubePlayerResponse;
+    try {
+      playerResponse = JSON.parse(playerResponseJson) as YouTubePlayerResponse;
+    } catch {
+      throw new ProviderError(this.providerName, 'failure', 'Malformed YouTube player response');
+    }
+
+    const tracks = playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
+    const captionTrack = chooseCaptionTrack(tracks, language);
+
+    if (!captionTrack?.baseUrl) {
+      return null;
+    }
+
+    try {
+      const transcriptXml = await fetchText(captionTrack.baseUrl, this.providerName, this.fetchImpl, this.timeoutMs);
+      const segments = parseTimedTextTranscript(transcriptXml);
+
+      if (segments.length === 0) {
+        return null;
+      }
+
+      return buildTranscriptCacheEntry({
+        videoId: video.sourceId,
+        language,
+        captionTrackSignature: hashValue(
+          `${captionTrack.vssId ?? captionTrack.languageCode ?? language}:${captionTrack.baseUrl}`
+        ),
+        durationSec: video.durationSec,
+        timestampConfidence: captionTrack.kind === 'asr' ? 0.8 : 0.95,
+        boundaryUncertainty: captionTrack.kind === 'asr' ? 0.18 : 0.08,
+        segments
+      });
+    } catch (error) {
+      if (error instanceof MalformedTranscriptError) {
+        throw new ProviderError(this.providerName, 'failure', `Malformed transcript payload for ${video.sourceId}`);
+      }
+
+      throw error;
+    }
   }
 }
 
@@ -293,7 +507,7 @@ export const createConfiguredDiscoveryProvider = (logger: StructuredLogger = cre
 
 export const createConfiguredTranscriptProvider = () => {
   if (RUNTIME_CONFIG.transcriptProvider === 'youtube-captions') {
-    return new ExplicitDegradedTranscriptProvider();
+    return new YouTubeCaptionsTranscriptProvider();
   }
 
   return createMockTranscriptProvider();

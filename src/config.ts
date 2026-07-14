@@ -59,7 +59,11 @@ export const APP_CONFIG = {
   },
   transcript: {
     preferredLanguage: 'en',
-    cacheTtlMs: 15 * 60 * 1000
+    cacheTtlMs: 15 * 60 * 1000,
+    providerTimeoutMs: 6_000,
+    maxSegments: 2_000,
+    maxCharactersPerSegment: 500,
+    maxTotalCharacters: 100_000
   },
   progressByStage: {
     discovery: 12,

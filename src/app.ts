@@ -18,21 +18,23 @@ interface JobStoreLike {
 
 interface AppOptions {
   logger?: StructuredLogger;
+  trustProxyHeaders?: boolean;
 }
 
 export const createApp = (clientDir: string, jobs?: JobStoreLike, options: AppOptions = {}) => {
   const logger = options.logger ?? createStructuredLogger();
   const jobStore = jobs ?? new JobStore({ logger });
   const app = express();
+  const trustProxyHeaders = options.trustProxyHeaders ?? RUNTIME_CONFIG.trustProxyHeaders;
 
   app.disable('x-powered-by');
-  app.set('trust proxy', RUNTIME_CONFIG.trustProxyHeaders);
+  app.set('trust proxy', trustProxyHeaders);
   app.use(express.json({ limit: '16kb' }));
   app.use(express.static(clientDir));
 
   app.post('/search', (request, response) => {
     const requestId = randomUUID();
-    const ip = getRequestIp(request);
+    const ip = getRequestIp(request, trustProxyHeaders);
     const rawToken = request.header('x-anon-token');
     const tokenValidation = validateAnonymousToken(rawToken);
     const baseLogFields = {

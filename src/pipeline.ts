@@ -11,6 +11,7 @@ import {
   type TranscriptProvider
 } from './providers.js';
 import { deriveRelevanceScore } from './relevance.js';
+import { MalformedTranscriptError, assertValidTranscriptEntry } from './transcript.js';
 import type {
   AudioEmotionOutput,
   CandidateVideoLite,
@@ -154,7 +155,29 @@ export class ViralClipPipeline {
     const language = APP_CONFIG.transcript.preferredLanguage;
     return this.transcriptCache.getOrLoad(
       this.transcriptProvider.getCacheKey(video, language),
-      () => this.transcriptProvider.getTranscript(video, language)
+      async () => {
+        const transcript = await this.transcriptProvider.getTranscript(video, language);
+        if (!transcript) {
+          return null;
+        }
+
+        try {
+          return assertValidTranscriptEntry(transcript, {
+            videoId: video.sourceId,
+            language
+          });
+        } catch (error) {
+          if (error instanceof MalformedTranscriptError) {
+            throw new ProviderError(
+              this.transcriptProvider.providerName,
+              'failure',
+              `Malformed transcript payload for ${video.sourceId}`
+            );
+          }
+
+          throw error;
+        }
+      }
     );
   }
 

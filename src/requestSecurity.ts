@@ -29,8 +29,8 @@ export const validateAnonymousToken = (value: unknown): AnonymousTokenValidation
   return { ok: true, token: token.toLowerCase() };
 };
 
-export const getRequestIp = (request: Request) => {
-  if (RUNTIME_CONFIG.trustProxyHeaders) {
+export const getRequestIp = (request: Request, trustProxyHeaders = RUNTIME_CONFIG.trustProxyHeaders) => {
+  if (trustProxyHeaders) {
     return normalizeIp(request.ip || request.socket.remoteAddress || undefined);
   }
 
