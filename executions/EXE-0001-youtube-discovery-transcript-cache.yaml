@@ -1,0 +1,149 @@
+metadata:
+  execution_id: EXE-0001
+  title: Real YouTube discovery and transcript cache slice
+  status: in_progress
+  owners:
+    - engineering
+    - qa_security
+    - orchestrator
+  directive_refs:
+    - DIR-0001
+  last_updated: 2026-07-13
+
+scope:
+  objective: Replace mock discovery and transcript stages with real provider-backed integrations while preserving the existing API and UI contracts.
+  in_scope:
+    - real YouTube Data API discovery adapter mapped to CandidateVideoLite
+    - transcript acquisition adapter with deterministic language selection for MVP
+    - Layer-A transcript cache keying, TTL, and in-flight request coalescing
+    - job-stage wiring for real discovery and transcript execution
+    - degraded-path handling, logging, and contract regression validation
+  out_of_scope:
+    - Hume audio integration
+    - scoring model redesign
+    - rendered clip generation pipeline changes
+    - UI feature expansion beyond compatibility verification
+
+handoff:
+  owners:
+    orchestrator: DOE Orchestrator
+    project_manager: DOE Project Manager
+    ux_ui: N/A
+    engineering: DOE Full Stack Delivery
+    qa_security: DOE QA Security
+    ci_enforcement: N/A
+  acceptance_criteria:
+    - Valid search uses real YouTube discovery when provider config is enabled and API response contracts remain unchanged.
+    - Transcript acquisition runs for discovered videos and reuses Layer-A cache entries on repeated searches.
+    - Concurrent identical transcript fetches coalesce to one upstream request per cache key.
+    - Job polling continues to expose status, stage, progressPct, and clipsReadyCount without UI changes.
+    - Partial transcript/provider failures degrade safely without crashing the job or leaking secrets.
+    - Existing downstream deterministic scoring and selection remain unchanged for identical transcript inputs.
+  risk_tier: high
+  risk_rationale: External-provider variability, transcript-source ambiguity, and quota/timeout behavior can break reliability, cost control, or determinism if not tightly bounded.
+  threat_or_abuse_assumptions:
+    - keyword spam may attempt to exhaust upstream quotas or transcript compute
+    - malformed upstream provider payloads must not crash the server
+    - secrets must remain server-only and never leak to client responses or logs
+  validation_plan:
+    engineering:
+      - npm run build
+      - npm test
+      - integration coverage for discovery mapping, transcript cache reuse, and duplicate in-flight coalescing
+    qa_security:
+      - negative-path tests for invalid or missing provider configuration
+      - quota, timeout, no-caption, malformed payload, and partial-failure degraded-state verification
+      - secret redaction and rate-limit regression checks
+    ci_enforcement:
+      - N/A for this slice until CI automation is expanded beyond current local checks
+  release_gates:
+    - provider configuration is environment-only and documented
+    - API/UI contracts remain backward compatible
+    - transcript cache reuse is evidenced in tests
+    - degraded-path behavior is validated
+    - rollback toggle to mock providers is verified
+  rollback_expectation:
+    - keep real-provider integration behind configuration so the app can revert immediately to the current mock pipeline without schema or data migration changes
+
+quality_gates:
+  definition_of_ready:
+    project_manager: pass
+    ux_ui: n/a
+    qa_security: pass
+    ci_enforcement: n/a
+    notes:
+      - Slice boundary is limited to discovery and transcript stages.
+      - Existing MVP contracts and UI behavior remain the compatibility baseline.
+      - Transcript acquisition mechanism still requires an implementation choice but is explicitly scoped as a provider adapter decision within the slice.
+  definition_of_done:
+    engineering: pass
+    qa_security: fail
+    ci_enforcement: n/a
+    orchestrator: fail
+    notes:
+      - Engineering completed the provider boundary, real YouTube discovery path, transcript Layer-A cache, and local validation.
+      - QA/security did not clear the slice because the youtube-captions transcript mode still falls back to mock behavior and auth/logging controls remain below directive baseline.
+
+backlog:
+  items:
+    - SLICE-4-real-youtube-discovery-transcript-cache
+    - mvp-provider-integration-slice
+  dependencies:
+    - YouTube Data API key configured
+    - transcript acquisition provider selected and wired
+    - current MVP foundation app on branch 2026/feat/mvp-foundation-app
+
+implementation:
+  systems_touched:
+    - api
+    - job orchestrator
+    - provider adapters
+    - cache layer
+    - tests
+  approach:
+    - add a real YouTube discovery adapter with bounded fields and deterministic mapping
+    - add a transcript provider abstraction with deterministic language handling and safe degraded behavior
+    - reuse the current mock pipeline as a fallback path controlled by configuration
+    - preserve current endpoint payloads and progressive job-stage behavior
+  preview:
+    run_command: npm run dev
+    verification: Search flow still returns the same response shapes. Real YouTube discovery can be enabled by configuration; transcript provider mode remains partially implemented because youtube-captions currently falls back to mock behavior.
+  deployment:
+    free_host_provider: Vercel
+    steps:
+      - configure runtime environment variables in the host dashboard
+      - run npm run build during deployment
+      - verify search, job polling, and clip feed against deployed environment
+  rollback:
+    - disable real provider mode and return to deterministic mock providers
+    - redeploy without changing client contracts
+
+validation:
+  engineering_checks:
+    - build
+    - deterministic pipeline regression tests
+    - provider adapter and cache integration tests
+  qa_checks:
+    - API contract regression for search, job status, and clips endpoints
+    - partial transcript failure and degraded-job scenario
+    - repeated search cache reuse scenario
+  security_checks:
+    - missing or invalid provider configuration does not expose secrets
+    - rate-limit and keyword validation regressions remain blocked
+    - malformed upstream payloads do not crash the server
+  evidence:
+    - npm run build -> pass
+    - npm test -> pass (6/6 tests)
+    - local contract validation confirmed POST /search, GET /jobs/{jobId}, and GET /jobs/{jobId}/clips response shapes remain stable
+    - real YouTube discovery provider mapping is covered by automated test using stubbed provider payloads
+    - transcript cache reuse, TTL expiry, and concurrent in-flight coalescing are covered by automated tests
+    - provider fallback path now logs sanitized fallback reasons instead of silently swallowing failures
+
+risk:
+  residual_risks:
+    - youtube-captions transcript mode is not yet a real transcript integration and currently falls back to mock behavior for non-mock videos
+    - anonymous token enforcement and search request logging remain below directive baseline for a business-style application slice
+    - transcript-source quality and availability may still vary significantly by video
+    - in-memory cache may not reflect production contention or persistence behavior
+    - provider quotas may constrain integration testing realism
+  release_recommendation: no-go

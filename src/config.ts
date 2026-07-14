@@ -57,6 +57,10 @@ export const APP_CONFIG = {
     },
     scorePrecision: 6
   },
+  transcript: {
+    preferredLanguage: 'en',
+    cacheTtlMs: 15 * 60 * 1000
+  },
   progressByStage: {
     discovery: 12,
     transcript: 30,
@@ -80,3 +84,24 @@ export const SCORING_CONFIG_HASH = createHash('sha1')
   .update(JSON.stringify(scoringHashSource))
   .digest('hex')
   .slice(0, 12);
+
+const readPositiveInteger = (value: string | undefined, fallback: number) => {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const readProviderMode = <TMode extends string>(value: string | undefined, supported: readonly TMode[], fallback: TMode) => {
+  const normalized = value?.trim().toLowerCase();
+  return normalized && supported.includes(normalized as TMode) ? (normalized as TMode) : fallback;
+};
+
+export const RUNTIME_CONFIG = {
+  discoveryProvider: readProviderMode(process.env.DISCOVERY_PROVIDER, ['mock', 'youtube-data-api'] as const, 'mock'),
+  transcriptProvider: readProviderMode(process.env.TRANSCRIPT_PROVIDER, ['mock', 'youtube-captions'] as const, 'mock'),
+  youtubeDataApiKey: process.env.YOUTUBE_DATA_API_KEY?.trim() || '',
+  transcriptCacheTtlMs: readPositiveInteger(process.env.TRANSCRIPT_CACHE_TTL_MS, APP_CONFIG.transcript.cacheTtlMs)
+} as const;

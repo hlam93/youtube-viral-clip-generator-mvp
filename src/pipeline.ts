@@ -1,5 +1,14 @@
-import { APP_CONFIG, SCORING_CONFIG_HASH } from './config.js';
-import { MOCK_VIDEO_LIBRARY } from './mockData.js';
+import { AsyncValueCache } from './cache.js';
+import { APP_CONFIG, RUNTIME_CONFIG, SCORING_CONFIG_HASH } from './config.js';
+import {
+  createConfiguredDiscoveryProvider,
+  createConfiguredTranscriptProvider,
+  createMockDiscoveryProvider,
+  createMockTranscriptProvider,
+  type DiscoveryProvider,
+  type TranscriptProvider
+} from './providers.js';
+import { deriveRelevanceScore } from './relevance.js';
 import type {
   AudioEmotionOutput,
   CandidateVideoLite,
@@ -7,16 +16,12 @@ import type {
   ScoredWindow,
   TranscriptCacheEntry
 } from './types.js';
-import { hashValue, normalizeKeywords, roundScore, tokenize } from './utils.js';
+import { hashValue, roundScore, tokenize } from './utils.js';
 
 interface VideoContext {
   video: CandidateVideoLite;
   transcript: TranscriptCacheEntry;
 }
-
-const transcriptCache = new Map<string, Promise<TranscriptCacheEntry>>();
-const audioCache = new Map<string, Promise<AudioEmotionOutput>>();
-const ensembleCache = new Map<string, Promise<ScoredWindow>>();
 
 const EXCITEMENT_WORDS = new Set([
   'amazing',
@@ -65,19 +70,6 @@ const buildWindowText = (segments: TranscriptCacheEntry['segments'], startSec: n
     .map((segment) => segment.text)
     .join(' ');
 
-const deriveRelevanceScore = (keywords: string, text: string, title: string, channelName: string) => {
-  const keywordTokens = tokenize(keywords);
-  const corpusTokens = new Set(tokenize(`${text} ${title} ${channelName}`));
-
-  if (keywordTokens.length === 0) {
-    return 0;
-  }
-
-  const hits = keywordTokens.filter((token) => corpusTokens.has(token)).length;
-  const phraseBonus = normalizeKeywords(`${title} ${text}`).includes(normalizeKeywords(keywords)) ? 0.15 : 0;
-  return roundScore(Math.min(1, hits / keywordTokens.length + phraseBonus));
-};
-
 const deriveTranscriptEmotionScore = (text: string) => {
   const tokens = tokenize(text);
   const excitingHits = tokens.filter((token) => EXCITEMENT_WORDS.has(token)).length;
@@ -123,43 +115,35 @@ const deriveQualityPenalty = (transcript: TranscriptCacheEntry, durationSec: num
 
 const windowKey = (videoId: string, startTimeSec: number, endTimeSec: number) => `${videoId}:${startTimeSec}:${endTimeSec}`;
 
-export class MockPipeline {
-  async discover(keywords: string) {
-    const normalized = normalizeKeywords(keywords);
+interface PipelineOptions {
+  discoveryProvider?: DiscoveryProvider;
+  transcriptProvider?: TranscriptProvider;
+  transcriptCacheTtlMs?: number;
+}
 
-    return MOCK_VIDEO_LIBRARY.map((record) => ({
-      video: record.video,
-      matchScore: deriveRelevanceScore(
-        normalized,
-        record.transcript.segments.map((segment) => segment.text).join(' '),
-        record.video.title,
-        record.video.channelName
-      )
-    }))
-      .filter((record) => record.matchScore > 0 || normalized.length <= 3)
-      .sort((left, right) => right.matchScore - left.matchScore || sortVideos(left.video, right.video))
-      .slice(0, APP_CONFIG.jobCaps.maxVideosPerJob)
-      .map((record) => record.video);
+export class ViralClipPipeline {
+  private readonly transcriptCache: AsyncValueCache<TranscriptCacheEntry>;
+  private readonly audioCache = new Map<string, Promise<AudioEmotionOutput>>();
+  private readonly ensembleCache = new Map<string, Promise<ScoredWindow>>();
+
+  constructor(
+    private readonly discoveryProvider: DiscoveryProvider,
+    private readonly transcriptProvider: TranscriptProvider,
+    transcriptCacheTtlMs = RUNTIME_CONFIG.transcriptCacheTtlMs
+  ) {
+    this.transcriptCache = new AsyncValueCache<TranscriptCacheEntry>(transcriptCacheTtlMs);
+  }
+
+  async discover(keywords: string) {
+    return this.discoveryProvider.discover(keywords);
   }
 
   async getTranscript(video: CandidateVideoLite) {
-    const key = `yt:${video.sourceId}:en:mock-${video.sourceId}-en`;
-    const cached = transcriptCache.get(key);
-    if (cached) {
-      return cached;
-    }
-
-    const next = Promise.resolve(
-      MOCK_VIDEO_LIBRARY.find((record) => record.video.sourceId === video.sourceId)?.transcript
-    ).then((transcript) => {
-      if (!transcript) {
-        throw new Error(`No transcript found for ${video.sourceId}`);
-      }
-      return transcript;
-    });
-
-    transcriptCache.set(key, next);
-    return next;
+    const language = APP_CONFIG.transcript.preferredLanguage;
+    return this.transcriptCache.getOrLoad(
+      this.transcriptProvider.getCacheKey(video, language),
+      () => this.transcriptProvider.getTranscript(video, language)
+    );
   }
 
   async scoreWindows(keywords: string, contexts: VideoContext[]) {
@@ -262,13 +246,19 @@ export class MockPipeline {
 
   async buildContexts(videos: CandidateVideoLite[]) {
     const contexts = await Promise.all(
-      videos.map(async (video) => ({
-        video,
-        transcript: await this.getTranscript(video)
-      }))
+      videos.map(async (video) => {
+        try {
+          const transcript = await this.getTranscript(video);
+          return transcript ? { video, transcript } : null;
+        } catch {
+          return null;
+        }
+      })
     );
 
-    return contexts.sort((left, right) => sortVideos(left.video, right.video));
+    return contexts
+      .filter((context): context is VideoContext => context !== null)
+      .sort((left, right) => sortVideos(left.video, right.video));
   }
 
   private async generateWindows(keywords: string, context: VideoContext) {
@@ -285,14 +275,14 @@ export class MockPipeline {
           const text = buildWindowText(context.transcript.segments, startTimeSec, endTimeSec);
           const boundarySignature = `${index}:${startTimeSec}:${endTimeSec}`;
           const cacheKey = `yt:${context.video.sourceId}:${SCORING_CONFIG_HASH}:${boundarySignature}`;
-          const cached = ensembleCache.get(cacheKey);
+          const cached = this.ensembleCache.get(cacheKey);
 
           if (cached) {
             return cached;
           }
 
           const next = this.scoreWindow(keywords, context, startTimeSec, endTimeSec, text, boundarySignature);
-          ensembleCache.set(cacheKey, next);
+          this.ensembleCache.set(cacheKey, next);
           return next;
         })
     );
@@ -309,10 +299,10 @@ export class MockPipeline {
     boundarySignature: string
   ) {
     const audioKey = `yt:${context.video.sourceId}:${boundarySignature}:${hashValue(JSON.stringify(APP_CONFIG.scoring.hume))}`;
-    const cachedAudio = audioCache.get(audioKey);
+    const cachedAudio = this.audioCache.get(audioKey);
     const audioPromise = cachedAudio ?? Promise.resolve(deriveAudioEmotion(context.video.sourceId, boundarySignature, text));
     if (!cachedAudio) {
-      audioCache.set(audioKey, audioPromise);
+      this.audioCache.set(audioKey, audioPromise);
     }
 
     const audio = await audioPromise;
@@ -345,4 +335,16 @@ export class MockPipeline {
   }
 }
 
-export const createMockPipeline = () => new MockPipeline();
+export const createPipeline = (options: PipelineOptions = {}) =>
+  new ViralClipPipeline(
+    options.discoveryProvider ?? createConfiguredDiscoveryProvider(),
+    options.transcriptProvider ?? createConfiguredTranscriptProvider(),
+    options.transcriptCacheTtlMs ?? RUNTIME_CONFIG.transcriptCacheTtlMs
+  );
+
+export const createMockPipeline = () =>
+  new ViralClipPipeline(
+    createMockDiscoveryProvider(),
+    createMockTranscriptProvider(),
+    APP_CONFIG.transcript.cacheTtlMs
+  );

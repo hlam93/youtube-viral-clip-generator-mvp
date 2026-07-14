@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { APP_CONFIG } from './config.js';
-import { createMockPipeline } from './pipeline.js';
+import { createPipeline } from './pipeline.js';
 import type { ClipCard, JobStage, JobState, JobStatus } from './types.js';
 import { delay, normalizeKeywords } from './utils.js';
 
@@ -15,7 +15,7 @@ const stageStatus: Record<JobStage, JobStatus> = {
 
 export class JobStore {
   private readonly jobs = new Map<string, JobState>();
-  private readonly pipeline = createMockPipeline();
+  private readonly pipeline = createPipeline();
 
   createJob(keywords: string) {
     const jobId = randomUUID();
