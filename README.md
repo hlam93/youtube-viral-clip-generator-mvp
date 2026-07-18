@@ -78,13 +78,19 @@ This MVP is a single Node web app that can run on free tiers.
    - `TRANSCRIPT_EMOTION_PROVIDER=pinned-local-model`
    - `AUDIO_EMOTION_PROVIDER=hume-expression-measurement`
 
-### Option A: Vercel (free)
+### Option A: Render or Railway (free, recommended)
 
-1. In Vercel, **Add New Project** and import this repository.
-2. Framework preset: **Other** (Node app).
+This MVP's job store (`src/jobs.ts`), cache, and rate limiter are all in-process memory (a plain
+`Map`, not an external store). Render and Railway run the app as a single always-on container, so
+the same process instance serves every request and that in-memory state stays correct across a
+`POST /search` and a later `GET /jobs/:jobId` poll. This is the recommended free-tier target for
+this MVP as-is.
+
+1. Create a new **Web Service** from this repository.
+2. Runtime: Node.
 3. Build command: `npm run build`
 4. Start command: `npm start`
-5. Add runtime environment variables in the Vercel project settings (Production environment):
+5. Add runtime environment variables:
    - required: `DISCOVERY_PROVIDER`, `TRANSCRIPT_PROVIDER`, `TRANSCRIPT_EMOTION_PROVIDER`, `AUDIO_EMOTION_PROVIDER`, `YOUTUBE_DATA_API_KEY`, `HUME_API_KEY`
    - optional tuning: `HUME_MODEL_VERSION`, `HUME_API_BASE_URL`, `TRANSCRIPT_CACHE_TTL_MS`, `AUDIO_CACHE_TTL_MS`, `ENSEMBLE_CACHE_TTL_MS`, `TRUST_PROXY_HEADERS`
 6. Deploy.
@@ -93,14 +99,26 @@ This MVP is a single Node web app that can run on free tiers.
    - `GET /jobs/:jobId`
    - `GET /jobs/:jobId/clips`
 
-### Option B: Render or Railway (free)
+### Option B: Vercel (free, needs an external store first)
 
-1. Create a new **Web Service** from this repository.
-2. Runtime: Node.
+Vercel's serverless model does not guarantee that the same instance handles a `POST /search` and a
+later `GET /jobs/:jobId` poll for the same job, so this MVP's in-memory job store, cache, and rate
+limiter can silently 404 or under-count in production. Vercel is usable, but only after replacing
+that in-memory state with an external store (for example Redis) that all instances share — this
+MVP does not include that store, so treat Option A as the default until it does.
+
+1. In Vercel, **Add New Project** and import this repository.
+2. Framework preset: **Other** (Node app).
 3. Build command: `npm run build`
 4. Start command: `npm start`
-5. Add the same environment variables listed above.
-6. Deploy and run the same API verification sequence.
+5. Add the same runtime environment variables listed above in the Vercel project settings
+   (Production environment), plus whatever external store connection variables your job
+   store/cache/rate-limiter migration requires.
+6. Deploy.
+7. Verify deployment by calling:
+   - `POST /search` with header `x-anon-token: <uuid>`
+   - `GET /jobs/:jobId`
+   - `GET /jobs/:jobId/clips`
 
 ### Pre-launch checks
 
