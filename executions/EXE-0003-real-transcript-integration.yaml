@@ -91,7 +91,7 @@ quality_gates:
 
 backlog:
   items:
-    - SLICE-6-real-youtube-captions-integration
+    - STORY-003-real-youtube-captions-integration
     - mvp-real-transcript-integration
   dependencies:
     - EXE-0002 committed on branch 2026/feat/mvp-foundation-app

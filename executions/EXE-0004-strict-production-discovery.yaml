@@ -90,7 +90,7 @@ quality_gates:
 
 backlog:
   items:
-    - SLICE-7-strict-production-discovery
+    - STORY-004-strict-production-discovery
     - next-execution-slice-governance
   dependencies:
     - EXE-0001 through EXE-0003 completed on branch 2026/feat/mvp-foundation-app

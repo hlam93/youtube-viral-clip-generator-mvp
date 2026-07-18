@@ -91,7 +91,7 @@ quality_gates:
 
 backlog:
   items:
-    - SLICE-5-real-transcript-auth-logging-hardening
+    - STORY-002-real-transcript-auth-logging-hardening
     - mvp-transcript-auth-hardening
   dependencies:
     - EXE-0001 provider boundary and cache foundation committed

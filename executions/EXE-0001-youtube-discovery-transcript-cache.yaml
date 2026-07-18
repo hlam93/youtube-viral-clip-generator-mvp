@@ -101,7 +101,7 @@ iteration_log:
 
 backlog:
   items:
-    - SLICE-4-real-youtube-discovery-transcript-cache
+    - STORY-001-real-youtube-discovery-transcript-cache
     - mvp-provider-integration-slice
   dependencies:
     - YouTube Data API key configured

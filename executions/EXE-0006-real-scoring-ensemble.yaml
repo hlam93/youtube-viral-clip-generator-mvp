@@ -92,7 +92,7 @@ quality_gates:
 
 backlog:
   items:
-    - SLICE-9-real-deterministic-scoring-ensemble
+    - STORY-006-real-deterministic-scoring-ensemble
     - mvp-scoring-ensemble-slice
     - followup-env-runtime-loading-contract
   dependencies:

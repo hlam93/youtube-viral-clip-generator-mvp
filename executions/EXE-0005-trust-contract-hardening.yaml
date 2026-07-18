@@ -90,7 +90,7 @@ quality_gates:
 
 backlog:
   items:
-    - SLICE-8-trust-contract-hardening
+    - STORY-005-trust-contract-hardening
     - mvp-trust-contract-hardening
   dependencies:
     - EXE-0001 through EXE-0004 completed on branch 2026/feat/mvp-foundation-app
