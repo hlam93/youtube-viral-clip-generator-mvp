@@ -11,6 +11,7 @@ import {
   type TranscriptProvider
 } from './providers.js';
 import { deriveRelevanceScore } from './relevance.js';
+import { createMockRenderManager, createRenderManager, RenderManager } from './renderPipeline.js';
 import {
   HumeExpressionMeasurementAudioProvider,
   PinnedTranscriptEmotionProvider,
@@ -76,10 +77,17 @@ interface PipelineOptions {
   transcriptProvider?: TranscriptProvider;
   transcriptEmotionProvider?: TranscriptEmotionProvider;
   audioEmotionProvider?: AudioEmotionProvider;
+  renderManager?: RenderManager;
   transcriptCacheTtlMs?: number;
   audioCacheTtlMs?: number;
   ensembleCacheTtlMs?: number;
   logger?: StructuredLogger;
+}
+
+export interface PackagedClips {
+  clips: ClipCard[];
+  /** clipId -> local rendered file path, for GET /rendered lookups. Never sent to the client. */
+  renderedFilePaths: Map<string, string>;
 }
 
 export class ViralClipPipeline {
@@ -94,6 +102,7 @@ export class ViralClipPipeline {
     private readonly transcriptProvider: TranscriptProvider,
     private readonly transcriptEmotionProvider: TranscriptEmotionProvider,
     private readonly audioEmotionProvider: AudioEmotionProvider,
+    private readonly renderManager: RenderManager = createRenderManager(),
     transcriptCacheTtlMs = RUNTIME_CONFIG.transcriptCacheTtlMs,
     audioCacheTtlMs = RUNTIME_CONFIG.audioCacheTtlMs,
     ensembleCacheTtlMs = RUNTIME_CONFIG.ensembleCacheTtlMs,
@@ -235,8 +244,9 @@ export class ViralClipPipeline {
     return selected.sort(sortWindows);
   }
 
-  packageClips(jobId: string, selectedWindows: ScoredWindow[]) {
+  async packageClips(jobId: string, selectedWindows: ScoredWindow[]): Promise<PackagedClips> {
     const packaged: ClipCard[] = [];
+    const renderedFilePaths = new Map<string, string>();
     let renderedCount = 0;
 
     for (const window of selectedWindows) {
@@ -268,25 +278,59 @@ export class ViralClipPipeline {
         continue;
       }
 
-      if (renderedCount < APP_CONFIG.jobCaps.maxRenderedClipsPerJob) {
-        renderedCount += 1;
+      // RenderKmax: hard per-job cap on rendered (Mode B) attempts, independent of success/failure.
+      if (renderedCount >= APP_CONFIG.jobCaps.maxRenderedClipsPerJob) {
+        continue;
+      }
+      renderedCount += 1;
+
+      const renderResult = await this.renderManager.ensureRenderedClip({
+        videoId: window.video.sourceId,
+        startTimeSec: window.startTimeSec,
+        endTimeSec: window.endTimeSec,
+        scoringConfigHash: this.scoringConfigHash
+      });
+
+      if (renderResult.ok && renderResult.filePath) {
+        renderedFilePaths.set(clipId, renderResult.filePath);
         packaged.push({
           ...baseClip,
           mode: 'rendered',
           clipFileUrl: `/rendered/${jobId}/${clipId}`,
           playUrl: `${window.video.playUrl}&t=${Math.floor(window.startTimeSec)}s`
         });
+        continue;
       }
+
+      // Degrade-gracefully choice (SYSTEM.md section 4 / EXE-0010): when Mode B rendering is
+      // unavailable (no licensed render source provider configured -- the default/production
+      // state -- or a render attempt fails), the unreliable clip is omitted from the feed rather
+      // than silently downgraded to Mode A. Mode A's reliability thresholds (coverage/confidence/
+      // boundary uncertainty) exist precisely to gate which windows are safe to present as
+      // timestamp cards; re-using them here for a window that already failed those thresholds
+      // would quietly violate that contract. Omission keeps the feed's quality bar intact and
+      // the job still completes/degrades normally instead of crashing.
+      this.logger.warn('provider_degraded', {
+        jobId,
+        stage: 'packaging',
+        provider: 'render-source',
+        videoId: window.video.sourceId,
+        reason: renderResult.reason ?? 'render_unavailable',
+        outcome: 'clip_omitted'
+      });
     }
 
-    return packaged.sort(
-      (left, right) =>
-        right.viralScore - left.viralScore ||
-        left.startTimeSec - right.startTimeSec ||
-        left.endTimeSec - right.endTimeSec ||
-        left.videoId.localeCompare(right.videoId) ||
-        left.clipId.localeCompare(right.clipId)
-    );
+    return {
+      clips: packaged.sort(
+        (left, right) =>
+          right.viralScore - left.viralScore ||
+          left.startTimeSec - right.startTimeSec ||
+          left.endTimeSec - right.endTimeSec ||
+          left.videoId.localeCompare(right.videoId) ||
+          left.clipId.localeCompare(right.clipId)
+      ),
+      renderedFilePaths
+    };
   }
 
   async buildContexts(videos: CandidateVideoLite[], correlation: { jobId?: string } = {}) {
@@ -445,6 +489,7 @@ export const createPipeline = (options: PipelineOptions = {}) =>
     options.transcriptProvider ?? createConfiguredTranscriptProvider(),
     options.transcriptEmotionProvider ?? createConfiguredTranscriptEmotionProvider(),
     options.audioEmotionProvider ?? createConfiguredAudioEmotionProvider(),
+    options.renderManager ?? createRenderManager({ logger: options.logger }),
     options.transcriptCacheTtlMs ?? RUNTIME_CONFIG.transcriptCacheTtlMs,
     options.audioCacheTtlMs ?? RUNTIME_CONFIG.audioCacheTtlMs,
     options.ensembleCacheTtlMs ?? RUNTIME_CONFIG.ensembleCacheTtlMs,
@@ -457,6 +502,7 @@ export const createMockPipeline = () =>
     createMockTranscriptProvider(),
     new PinnedTranscriptEmotionProvider(),
     new DeterministicAudioEmotionProvider(),
+    createMockRenderManager(),
     APP_CONFIG.transcript.cacheTtlMs,
     30 * 60 * 1000,
     10 * 60 * 1000,

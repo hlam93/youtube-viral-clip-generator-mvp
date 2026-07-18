@@ -1,0 +1,154 @@
+metadata:
+  execution_id: EXE-0010
+  title: Real Mode B rendered-fallback pipeline mechanics against a mock render source provider
+  status: completed
+  directive_refs:
+    - DIR-0001
+  last_updated: 2026-07-18
+
+scope:
+  objective: Replace the GET /rendered/:jobId/:clipId stub (a plain 302 redirect to the YouTube watch URL) with a real render pipeline -- quotas, concurrency limits, TTL cleanup, deterministic filenames, and an actual ffmpeg trim/re-encode step -- built against a pluggable, mock/dev-only RenderSourceProvider, per MVP_v1.md's Processing Pipeline step 6 ("Mode B" rendered fallback) and MISSION.md addendum #9 ("Rendered fallback pipeline specification" and its "Rendered pipeline best practices" implementation notes). No real YouTube video/audio extraction is implemented -- the YouTube Data API covers search/metadata/captions only, not download, and unofficial extraction (yt-dlp-style scraping) would violate YouTube's Terms of Service.
+  in_scope:
+    - src/renderProvider.ts -- RenderSourceProvider interface, MockRenderSourceProvider (synthesizes a tiny local ffmpeg lavfi fixture, never real YouTube-derived media), and createConfiguredRenderSourceProvider() which fails closed (ProviderConfigError) because no licensed provider exists yet
+    - src/renderPipeline.ts -- RenderManager, deterministic filenames from (videoId, startTimeSec, endTimeSec, scoringConfigHash), a RenderConcurrency gate (APP_CONFIG.jobCaps.maxConcurrentRenders) separate from ensemble/audio concurrency, TTL-based cleanup swept opportunistically on request-driven ensureRenderedClip calls (no new background timer, mirroring src/rateLimit.ts), and the real ffmpeg trim/re-encode invocation via execFile argument arrays
+    - src/pipeline.ts packageClips() becoming async and calling the render manager for Mode B (unreliable) windows, up to the existing RenderKmax (APP_CONFIG.jobCaps.maxRenderedClipsPerJob); degrading a clip to "omitted from the feed" (not a crash) when rendering is unavailable or fails
+    - src/jobs.ts storing a per-job clipId -> local rendered file path map (server-side only, never serialized to a client response) alongside the existing job state
+    - src/app.ts GET /rendered/:jobId/:clipId actually streaming the rendered file (response.sendFile) when one exists, falling back to the pre-existing redirect otherwise
+    - src/config.ts additions -- RENDER_SOURCE_PROVIDER runtime config field (mock-only mode, fails closed like the other provider fields), maxConcurrentRenders, and render TTL/output-dir/sweep-interval/ffmpeg-timeout constants
+    - README.md / .env.example documentation of the new optional render env vars and the intentional fail-closed production default
+    - regression coverage -- end-to-end mock-provider render + real HTTP serving, deterministic filename reuse, RenderConcurrency bounding, TTL sweep, fail-closed verification, and the no-provider-configured degrade path
+  out_of_scope:
+    - any real YouTube video/audio extraction implementation (permanent exclusion pending a licensing decision, not a deferred TODO)
+    - changes to Mode A (timestamp) selection/scoring/reliability-threshold logic
+    - src/client/** (owned by EXE-0009, untouched here)
+    - splitting the monolithic tests/pipeline.test.ts file (pre-existing, out-of-scope convention from EXE-0007)
+    - CI wiring specific to this slice beyond what EXE-0008's existing product-ci.yml already runs (npm run build / npm test)
+
+handoff:
+  owners: { orchestrator: DOE Orchestrator, project_manager: DOE Project Manager, ux_ui: N/A, engineering: DOE Full Stack Delivery, qa_security: DOE QA Security, ci_enforcement: DOE CI Enforcement }
+  acceptance_criteria:
+    - With RENDER_SOURCE_PROVIDER=mock (or createMockPipeline()/createMockRenderManager() wired directly in dev/test), a full pipeline run that selects a clip needing Mode B produces a real rendered mp4 file (verified via ffprobe -- valid h264/aac container) served by GET /rendered/:jobId/:clipId with a 200 response and video/mp4 content-type, not a redirect.
+    - Rendered (Mode B) clip attempts never exceed APP_CONFIG.jobCaps.maxRenderedClipsPerJob (RenderKmax) in a single job.
+    - Concurrent render attempts never exceed RenderConcurrency (APP_CONFIG.jobCaps.maxConcurrentRenders) in-flight at once, verified via a stubbed source provider tracking peak concurrency.
+    - Rendering the identical (videoId, startTimeSec, endTimeSec, scoringConfigHash) twice reuses the existing output file (same path, source provider fetched only once) instead of re-rendering.
+    - A rendered file older than its TTL is removed by the next request-driven ensureRenderedClip call (sweep is piggybacked on that call path; no new background timer).
+    - createConfiguredRenderSourceProvider() throws ProviderConfigError (fails closed) when RENDER_SOURCE_PROVIDER is unset or set to an unsupported value, and createRenderManager() never lets that exception propagate to pipeline/JobStore construction -- it degrades to a null provider instead.
+    - With no render source provider configured (the production default), a pipeline run that would otherwise need Mode B for a given window completes the job (status completed/degraded, never an unhandled exception) with that window's clip omitted from job.clips; other reliable (Mode A) clips in the same job are unaffected.
+    - No subprocess invocation in the new code interpolates caller-controlled input into a shell string; all ffmpeg calls use execFile with argument arrays. Deterministic filenames are hash-derived, so even a hostile videoId never reaches the filesystem or the subprocess argument list verbatim.
+    - GET /jobs/{jobId}/clips and GET /jobs/{jobId} payload/status-code contracts are unchanged; the local rendered file path is never present in any client-facing JSON response.
+    - npm run build and npm test are green.
+  risk_tier: high
+  risk_rationale: This slice introduces a new subprocess/media-processing execution surface (ffmpeg invocation) on a security.scope business application (SYSTEM.md section 4 defaults business scope to medium-or-higher), plus new local-filesystem write/read/cleanup behavior reachable from job packaging and a public HTTP route (GET /rendered). Command-injection-shaped surfaces and file-serving surfaces both warrant the high tier even though the concrete provider behind them is mock/dev-only in this slice.
+  threat_or_abuse_assumptions:
+    - a malicious or malformed videoId/window signature must never be interpolated into a shell command; all subprocess calls use execFile argument arrays, and the only caller-influenced value that reaches ffmpeg at all is an internally computed, hash-derived file path (never the raw videoId/timestamps)
+    - GET /rendered/:jobId/:clipId is intentionally public (pre-existing, unchanged trust decision from before this slice -- see README's "Anonymous-token contract" section) but must only ever serve a file this app itself rendered into its own managed output directory, never an arbitrary path; the served path is always RenderManager's own deterministic join(outputDir, hash(...) + '.mp4'), never derived from unsanitized request input
+    - a burst of distinct Mode B clips within one job, or across concurrent jobs, must not allow unbounded concurrent ffmpeg subprocesses (RenderConcurrency) or unbounded rendered-file disk growth (RenderKmax per job plus TTL-based cleanup)
+    - the mock render source provider must never fetch or reference real YouTube-derived media; it exists solely to exercise the pipeline mechanics against synthetic (ffmpeg lavfi test pattern + tone) content
+  validation_plan:
+    engineering:
+      - npm run build
+      - npm test
+      - manual ffprobe inspection of a rendered output file to confirm a real, valid h264/aac mp4 container was produced (not a stub/empty file)
+      - rollback verification via git stash of exactly the slice's touched files, confirming pre-slice build/test (33/33) still passes with the render pipeline entirely absent
+    qa_security:
+      - independent review of every subprocess invocation site (src/renderProvider.ts, src/renderPipeline.ts) confirming execFile + argument arrays only, no shell:true, no string-interpolated exec
+      - independent verification that createConfiguredRenderSourceProvider() fails closed for unset/invalid RENDER_SOURCE_PROVIDER, and that createRenderManager()/pipeline packaging never crash a job when no provider is configured
+      - confirmation that no local filesystem path is ever present in a GET /jobs/{jobId}/clips or GET /jobs/{jobId} response body
+      - dedicated security_signoff verdict
+    ci_enforcement:
+      - existing product-ci.yml (EXE-0008) already runs npm run build / npm test on PRs touching app source or dependencies; no new CI wiring required for this slice
+  release_gates:
+    - npm run build and npm test are green
+    - rollback verified by actually reverting the touched files and re-running build/test, not just documented as an intention
+    - security_signoff is a pass
+    - no real YouTube-fetching code path exists anywhere in the new render modules
+  rollback_expectation:
+    - revert src/renderProvider.ts, src/renderPipeline.ts (delete both -- new files), and the edits to src/pipeline.ts, src/jobs.ts, src/types.ts, src/app.ts, src/config.ts, tests/pipeline.test.ts, README.md, and .env.example to their pre-slice state in one deploy
+    - no data migration required -- rendered output files are cache/TTL-managed local artifacts under an OS temp directory (or RENDERED_CLIPS_DIR), not a durable store -- a rollback simply stops producing/serving them, and any already-rendered files age out via the pre-existing TTL sweep or can be deleted directly with no application-level cleanup step
+  rollback_verified: true
+
+quality_gates:
+  definition_of_ready: { project_manager: pass, ux_ui: n/a, qa_security: pass, ci_enforcement: pass, notes: ["Scope bounded to Mode B render pipeline mechanics against a mock provider only, per MVP_v1.md step 6 and MISSION.md addendum #9; real YouTube-fetching explicitly and permanently excluded pending a licensing decision.", "Test matrix drafted up front: e2e mock-render-and-serve, deterministic reuse, concurrency bound, TTL sweep, fail-closed provider resolution, no-provider-configured degrade path, and a command-injection-shape regression guard."] }
+  definition_of_done:
+    engineering: pass
+    project_manager: pass
+    ux_ui: n/a
+    qa_security: pass
+    ci_enforcement: pass
+    security_signoff: pass
+    orchestrator: pass
+    notes:
+      - "Build and test evidence: npm run build succeeded with no errors; npm test 41/41 pass (33 pre-existing + 8 new render-pipeline tests), including a real ffprobe-verified rendered mp4 served with a 200/video-mp4 response instead of a redirect."
+      - "Security review (see risk.residual_risks and validation.security_checks) confirmed: (1) every subprocess call in src/renderProvider.ts and src/renderPipeline.ts uses node:child_process execFile with argument arrays -- grepped the whole render surface for 'shell' and 'exec(' and found no shell:true or string-interpolated exec; (2) rendered filenames/paths are hash-derived from (videoId, start, end, configHash) via the existing hashValue() helper, so caller-controlled input (including a deliberately hostile videoId containing shell metacharacters, exercised in a dedicated test) never reaches a filesystem path or subprocess argument verbatim; (3) createConfiguredRenderSourceProvider() was verified (by test) to throw ProviderConfigError for both an unset and an unsupported RENDER_SOURCE_PROVIDER value, and createRenderManager() was verified (by test) to catch that error and degrade to a null provider -- ensureRenderedClip then returns { ok: false, reason: 'render_source_unavailable' } rather than throwing, and a full JobStore-driven job run with no provider configured completes normally with the Mode B clip simply absent from job.clips; (4) grepped the new modules for yt-dlp/ytdl/youtube-dl/scrape/download and found only a doc comment referencing the constraint -- no real YouTube-fetching code exists."
+      - "Rollback genuinely exercised, not just documented: git stash push of exactly the slice's touched/new files restored the pre-slice tree, npm run build and npm test (33/33) passed against that reverted state, then the stash was popped to restore this slice's changes (re-verified green: build clean, 41/41 tests)."
+      - "Degrade-gracefully decision (see scope.objective and handoff.acceptance_criteria): an unreliable window that cannot be rendered (no provider configured, or a render attempt fails) is omitted from the feed rather than silently downgraded to Mode A. Mode A's reliability thresholds (timestamp coverage/confidence, boundary uncertainty) exist specifically to gate which windows are safe to present as timestamp cards; reusing an already-failed window under Mode A would quietly violate that contract. Omission keeps the feed's quality bar intact (MVP_v1.md Success Criteria: 'Render fallback is rare and capped') and the job still completes/degrades normally."
+
+backlog:
+  items:
+    - STORY-010-render-source-provider-interface-and-mock
+    - STORY-010-render-manager-quotas-concurrency-ttl
+    - STORY-010-ffmpeg-trim-invocation
+    - STORY-010-rendered-route-real-file-serving
+    - STORY-010-render-degrade-gracefully-path
+  dependencies:
+    - EXE-0001 through EXE-0009 completed on branch 2026/feat/mvp-foundation-app
+    - a system ffmpeg binary on PATH for RENDER_SOURCE_PROVIDER=mock (dev/test only; unrelated to the production fail-closed default)
+
+implementation:
+  systems_touched:
+    - render source provider abstraction (new)
+    - render pipeline mechanics -- quotas, concurrency, TTL sweep, ffmpeg invocation (new)
+    - job packaging (Mode B branch)
+    - job state (server-side rendered-file-path registry)
+    - GET /rendered/:jobId/:clipId route
+    - runtime configuration
+    - tests
+    - deployment/env documentation
+  approach:
+    - define RenderSourceProvider mirroring the existing DiscoveryProvider/TranscriptProvider/AudioEmotionProvider pattern (interface, Mock implementation, createConfigured* fail-closed factory)
+    - implement RenderManager owning deterministic filenames, a concurrency-gated ffmpeg trim/re-encode step (execFile argument arrays only), and an opportunistic TTL sweep piggybacked on ensureRenderedClip calls (same pattern as rateLimit.ts's bucket sweep)
+    - make ViralClipPipeline.packageClips async so it can call the render manager for Mode B windows, capped at the existing RenderKmax, and degrade a window to feed-omission on any failure instead of throwing
+    - thread the resulting clipId -> local file path map through JobStore into GET /rendered, so a real render is streamed via response.sendFile when available, falling back to the pre-existing redirect otherwise
+    - keep the render source provider construction lazy/fail-closed at the render-attempt call site (never at pipeline/JobStore construction), so an unconfigured production environment never fails app startup over an optional fallback feature
+  preview:
+    run_command: npm run dev
+    verification: With RENDER_SOURCE_PROVIDER=mock set (and ffmpeg on PATH), running a search whose selection includes an unreliable window produces a rendered clip card whose clipFileUrl streams a real mp4 file; without RENDER_SOURCE_PROVIDER set, the same search still completes with that window simply absent from the feed.
+  deployment:
+    free_host_provider: Render or Railway (unchanged from EXE-0007; this slice adds no new deployment-topology requirement)
+    steps:
+      - run npm run build during deployment
+      - leave RENDER_SOURCE_PROVIDER unset in production (Mode B clips degrade gracefully rather than attempting to render)
+      - if a future licensed provider ships, set RENDERED_CLIPS_DIR to a writable, persistent-enough directory for the chosen TTL window and ensure an ffmpeg binary is present on the host
+  rollback:
+    - revert src/renderProvider.ts and src/renderPipeline.ts (delete), and the edits to src/pipeline.ts, src/jobs.ts, src/types.ts, src/app.ts, src/config.ts, tests/pipeline.test.ts, README.md, .env.example
+    - redeploy; no data migration required (rendered files are disposable, TTL-managed local artifacts)
+
+validation:
+  engineering_checks:
+    - build
+    - unit/integration tests (41/41)
+    - ffprobe verification of a real rendered mp4's codec/duration
+    - rollback re-verification after restoring the stashed changes
+  qa_checks:
+    - RenderKmax and RenderConcurrency caps hold under a full pipeline run and under direct concurrent-call stress
+    - deterministic filename reuse (no duplicate render work for an identical window)
+    - TTL sweep actually removes an expired file on a subsequent request-driven call
+    - no-provider-configured job run completes without crashing and without the unreliable clip appearing in the feed
+  security_checks:
+    - all render subprocess invocations use execFile + argument arrays (no shell:true, no exec() string interpolation) -- verified by code review and a dedicated hostile-input regression test
+    - createConfiguredRenderSourceProvider() fails closed for unset/invalid RENDER_SOURCE_PROVIDER -- verified by test
+    - no real YouTube video/audio fetch code path exists in the new modules -- verified by repository-wide grep for yt-dlp/ytdl/youtube-dl/scrape/download
+    - local rendered file paths never appear in a client-facing JSON response -- verified by code review of the /jobs/{jobId}/clips and /jobs/{jobId} handlers
+  evidence:
+    - npm run build -> pass (no errors)
+    - npm test -> pass (41/41 tests, up from the pre-slice 33/33)
+    - ffprobe on a rendered output file -> codec_name=h264 (video), codec_name=aac (audio), valid duration
+    - git-stash-based rollback re-verified pre-slice build/test green with the render pipeline entirely removed
+
+risk:
+  residual_risks:
+    - "By design, intentional, and permanent for this slice: no real RenderSourceProvider exists. createConfiguredRenderSourceProvider() always fails closed until a future slice makes and implements a licensing decision for fetching YouTube video/audio bytes server-side. Until then, Mode B is unavailable in production and every window needing it is omitted from the feed rather than rendered -- this is expected per MVP_v1.md ('Render fallback is rare and capped') and MISSION.md's non-goals, not a defect."
+    - "The mock render source provider always returns the same synthesized fixture regardless of the requested (videoId, startTimeSec, endTimeSec); the ffmpeg trim step clamps to the fixture's own ~20s length rather than literally reproducing the real video's requested window. This is acceptable because the fixture never represents real content in the first place -- the goal of this slice is exercising quotas/concurrency/TTL/determinism/ffmpeg mechanics, not simulating real trim accuracy against real media."
+    - "TTL sweep granularity matches the existing rateLimit.ts pattern (opportunistic, request-driven, no background timer): a rendered file can persist up to one full sweep interval past its nominal TTL if no render request happens to trigger a sweep in that window. Acceptable for a fallback feature with the existing per-job RenderKmax cap bounding total disk usage in the interim."
+    - "GET /rendered/:jobId/:clipId remains intentionally public (pre-existing decision, unchanged by this slice); this slice does not re-open that trust-boundary question, only ensures the path it can serve is always this app's own deterministic, managed output path."
+  release_recommendation: go-with-risk

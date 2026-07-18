@@ -1,13 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { resolve } from 'node:path';
+import { existsSync, mkdtempSync, utimesSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { createApp } from '../src/app.js';
 import { APP_CONFIG, readRuntimeConfig } from '../src/config.js';
 import { buildClipRenderModel, resolveSafeClipHref } from '../src/client/render.js';
 import { JobStore } from '../src/jobs.js';
 import { createStructuredLogger } from '../src/logging.js';
 import { createMockPipeline, createPipeline } from '../src/pipeline.js';
+import { createRenderManager, RenderManager } from '../src/renderPipeline.js';
+import {
+  createConfiguredRenderSourceProvider,
+  createMockRenderSourceProvider,
+  type RenderSourceProvider
+} from '../src/renderProvider.js';
 import {
   ProviderConfigError,
   ProviderError,
@@ -113,8 +121,8 @@ test('deterministic ranking remains stable and respects caps', async () => {
   const contexts = await pipeline.buildContexts(discovered);
   const firstScored = await pipeline.scoreWindows(keywords, contexts);
   const secondScored = await pipeline.scoreWindows(keywords, contexts);
-  const firstRun = pipeline.packageClips('job-a', pipeline.selectTopWindows(firstScored.windows));
-  const secondRun = pipeline.packageClips('job-b', pipeline.selectTopWindows(secondScored.windows));
+  const firstRun = (await pipeline.packageClips('job-a', pipeline.selectTopWindows(firstScored.windows))).clips;
+  const secondRun = (await pipeline.packageClips('job-b', pipeline.selectTopWindows(secondScored.windows))).clips;
 
   assert.deepEqual(
     firstRun.map((clip) => ({ videoId: clip.videoId, start: clip.startTimeSec, end: clip.endTimeSec, score: clip.viralScore, mode: clip.mode })),
@@ -490,10 +498,7 @@ test('pipeline preserves clip contract with an injected transcript provider', as
 
   const contexts = await pipeline.buildContexts([video]);
   const scored = await pipeline.scoreWindows('startup room electric', contexts);
-  const clips = pipeline.packageClips(
-    'job-contract',
-    pipeline.selectTopWindows(scored.windows)
-  );
+  const { clips } = await pipeline.packageClips('job-contract', pipeline.selectTopWindows(scored.windows));
 
   assert.ok(clips.length > 0);
   assert.ok(
@@ -1473,6 +1478,7 @@ test('job status and clip routes require the creating anonymous token and hide c
         dominantEmotion: string;
       }>;
       createdAt: number;
+      renderedFilePaths: Map<string, string>;
     }
   >();
   const jobs = {
@@ -1502,7 +1508,8 @@ test('job status and clip routes require the creating anonymous token and hide c
         progressPct: 100,
         clipsReadyCount: clips.length,
         clips,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        renderedFilePaths: new Map()
       });
       return { jobId };
     },
@@ -1717,4 +1724,232 @@ test('job_metrics_summary cache hit rate reflects each job own delta, not proces
   // keywords/videos, so its transcripts should now come from cache more often than the first
   // job's did.
   assert.ok((secondSummary?.cacheHitRateLayerA as number) >= (firstSummary?.cacheHitRateLayerA as number));
+});
+
+test('rendered fallback clips are actually produced by the mock render pipeline and served as real files', async () => {
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = createStructuredLogger((entry) => logs.push(entry));
+  const pipeline = createMockPipeline();
+  const jobs = new JobStore({ pipeline, logger });
+  const server = await startAppServer(createApp(clientDir, jobs, { logger }));
+
+  try {
+    const created = jobs.createJob('surprise speech budget hack');
+    const job = await waitForJobTerminalState(jobs, created.jobId);
+    assert.equal(job.status, 'completed');
+
+    const renderedClip = job.clips.find((clip) => clip.mode === 'rendered');
+    assert.ok(renderedClip, 'expected at least one rendered fallback clip from the gamma video');
+    assert.ok(renderedClip?.clipFileUrl?.startsWith(`/rendered/${created.jobId}/`));
+    assert.ok(job.clips.filter((clip) => clip.mode === 'rendered').length <= APP_CONFIG.jobCaps.maxRenderedClipsPerJob);
+
+    const response = await fetch(`${server.baseUrl}${renderedClip?.clipFileUrl}`, { redirect: 'manual' });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type') ?? '', /video\/mp4/);
+    const bytes = await response.arrayBuffer();
+    assert.ok(bytes.byteLength > 1_000, 'expected a real rendered media file, not an empty/stub response');
+  } finally {
+    await server.close();
+  }
+});
+
+test('GET /rendered redirects to playUrl when no rendered file is available for a rendered-mode clip', async () => {
+  const jobs = {
+    createJob: () => ({ jobId: 'job-x' }),
+    getJob: () => null,
+    getClips: () => null,
+    findClip: () => ({
+      clipId: 'clip-x',
+      jobId: 'job-x',
+      mode: 'rendered' as const,
+      platform: 'youtube' as const,
+      videoId: 'yt-fallback-001',
+      startTimeSec: 5,
+      endTimeSec: 20,
+      viralScore: 0.5,
+      channelName: 'Channel',
+      title: 'Title',
+      dominantEmotion: 'surprise',
+      clipFileUrl: '/rendered/job-x/clip-x',
+      playUrl: 'https://www.youtube.com/watch?v=yt-fallback-001&t=5s'
+    })
+    // No getRenderedFilePath: exercises the pre-EXE-0010 fallback redirect path directly.
+  };
+
+  const server = await startAppServer(createApp(clientDir, jobs));
+  try {
+    const response = await fetch(`${server.baseUrl}/rendered/job-x/clip-x`, { redirect: 'manual' });
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get('location'), 'https://www.youtube.com/watch?v=yt-fallback-001&t=5s');
+  } finally {
+    await server.close();
+  }
+});
+
+test('rendered clip filenames are deterministic: identical (videoId, start, end, configHash) reuses the file instead of re-rendering', async () => {
+  const provider = createMockRenderSourceProvider();
+  let fetchCalls = 0;
+  const spyProvider: RenderSourceProvider = {
+    providerName: 'spy-mock',
+    async fetchSourceMedia(input) {
+      fetchCalls += 1;
+      return provider.fetchSourceMedia(input);
+    }
+  };
+
+  const outputDir = mkdtempSync(join(tmpdir(), 'ex5-render-reuse-'));
+  const manager = new RenderManager(spyProvider, outputDir, 60_000, 2, 5 * 60_000, silentLogger);
+  const input = { videoId: 'yt-reuse-001', startTimeSec: 10, endTimeSec: 20, scoringConfigHash: 'reuse-test-hash' };
+
+  const first = await manager.ensureRenderedClip(input);
+  const second = await manager.ensureRenderedClip(input);
+
+  assert.ok(first.ok && first.filePath);
+  assert.ok(second.ok && second.filePath);
+  assert.equal(first.filePath, second.filePath);
+  assert.equal(fetchCalls, 1, 'expected the second identical request to reuse the rendered file, not re-fetch/re-render');
+
+  const differentWindow = await manager.ensureRenderedClip({ ...input, endTimeSec: 25 });
+  assert.ok(differentWindow.ok && differentWindow.filePath);
+  assert.notEqual(differentWindow.filePath, first.filePath);
+});
+
+test('render concurrency gate bounds simultaneous renders to RenderConcurrency', async () => {
+  const seedFixture = await createMockRenderSourceProvider().fetchSourceMedia({
+    videoId: 'seed',
+    startTimeSec: 0,
+    endTimeSec: 5
+  });
+  assert.ok(seedFixture);
+
+  let inFlight = 0;
+  let peakInFlight = 0;
+  const stubProvider: RenderSourceProvider = {
+    providerName: 'stub-render-source',
+    async fetchSourceMedia() {
+      inFlight += 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 60));
+      inFlight -= 1;
+      return seedFixture;
+    }
+  };
+
+  const outputDir = mkdtempSync(join(tmpdir(), 'ex5-render-concurrency-'));
+  const maxConcurrentRenders = 2;
+  const manager = new RenderManager(stubProvider, outputDir, 60_000, maxConcurrentRenders, 5 * 60_000, silentLogger);
+
+  await Promise.all(
+    Array.from({ length: 5 }, (_unused, index) =>
+      manager.ensureRenderedClip({
+        videoId: `concurrency-video-${index}`,
+        startTimeSec: 0,
+        endTimeSec: 5,
+        scoringConfigHash: 'concurrency-test-hash'
+      })
+    )
+  );
+
+  assert.ok(peakInFlight <= maxConcurrentRenders, `expected at most ${maxConcurrentRenders} concurrent renders, saw ${peakInFlight}`);
+});
+
+test('TTL sweep cleans up an expired rendered file on a subsequent request-driven check', async () => {
+  const provider = createMockRenderSourceProvider();
+  const outputDir = mkdtempSync(join(tmpdir(), 'ex5-render-ttl-'));
+  // sweepIntervalMs=0 forces maybeSweepExpired to run on every call, matching how a real request
+  // would eventually trigger a sweep once the interval elapses (rateLimit.ts uses the same pattern).
+  const manager = new RenderManager(provider, outputDir, 100, 2, 0, silentLogger);
+
+  const expiredResult = await manager.ensureRenderedClip({
+    videoId: 'ttl-video-old',
+    startTimeSec: 0,
+    endTimeSec: 5,
+    scoringConfigHash: 'ttl-test-hash'
+  });
+  assert.ok(expiredResult.ok && expiredResult.filePath);
+
+  const oldTimestamp = new Date(Date.now() - 60_000);
+  utimesSync(expiredResult.filePath!, oldTimestamp, oldTimestamp);
+
+  const freshResult = await manager.ensureRenderedClip({
+    videoId: 'ttl-video-fresh',
+    startTimeSec: 0,
+    endTimeSec: 5,
+    scoringConfigHash: 'ttl-test-hash'
+  });
+  assert.ok(freshResult.ok && freshResult.filePath);
+
+  assert.equal(existsSync(expiredResult.filePath!), false, 'expected the TTL-expired rendered file to be swept');
+  assert.equal(existsSync(freshResult.filePath!), true);
+});
+
+test('render pipeline never lets caller-controlled input reach a shell: filenames are hash-derived, not interpolated', async () => {
+  const provider = createMockRenderSourceProvider();
+  const outputDir = mkdtempSync(join(tmpdir(), 'ex5-render-injection-'));
+  const manager = new RenderManager(provider, outputDir, 60_000, 2, 5 * 60_000, silentLogger);
+
+  const hostileVideoId = '"; rm -rf . #';
+  const result = await manager.ensureRenderedClip({
+    videoId: hostileVideoId,
+    startTimeSec: 0,
+    endTimeSec: 5,
+    scoringConfigHash: 'injection-test-hash'
+  });
+
+  assert.ok(result.ok && result.filePath);
+  assert.equal(result.filePath?.includes(hostileVideoId), false);
+  assert.equal(existsSync(result.filePath!), true);
+});
+
+test('createConfiguredRenderSourceProvider fails closed with no real YouTube-fetching provider, and createRenderManager degrades instead of crashing', async () => {
+  const unsetConfig = readRuntimeConfig({});
+  assert.throws(
+    () => createConfiguredRenderSourceProvider(unsetConfig),
+    (error) => error instanceof ProviderConfigError && /No licensed render source provider configured/.test(error.message)
+  );
+
+  const invalidConfig = readRuntimeConfig({ RENDER_SOURCE_PROVIDER: 'youtube-download' });
+  assert.throws(() => createConfiguredRenderSourceProvider(invalidConfig), (error) => error instanceof ProviderConfigError);
+
+  const manager = createRenderManager({ runtimeConfig: unsetConfig, logger: silentLogger });
+  const result = await manager.ensureRenderedClip({
+    videoId: 'unconfigured-video',
+    startTimeSec: 0,
+    endTimeSec: 10,
+    scoringConfigHash: 'unset-provider-hash'
+  });
+
+  assert.deepEqual(result, { ok: false, reason: 'render_source_unavailable' });
+});
+
+test('pipeline degrades a Mode B clip to "omitted from feed" (not a crash) when no render source provider is configured', async () => {
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = createStructuredLogger((entry) => logs.push(entry));
+  const renderManager = createRenderManager({ renderSourceProvider: null, logger });
+  const pipeline = createPipeline({
+    discoveryProvider: createMockDiscoveryProvider(),
+    transcriptProvider: createMockTranscriptProvider(),
+    ...createTestScoringProviders(),
+    renderManager,
+    logger
+  });
+  const jobs = new JobStore({ pipeline, logger });
+
+  const created = jobs.createJob('surprise speech budget hack');
+  const job = await waitForJobTerminalState(jobs, created.jobId);
+
+  assert.equal(job.status, 'completed');
+  assert.ok(job.clips.length > 0);
+  assert.ok(job.clips.every((clip) => clip.videoId !== 'yt-gamma003'));
+  assert.ok(job.clips.every((clip) => clip.mode === 'timestamp'));
+  assert.ok(
+    logs.some(
+      (entry) =>
+        entry.event === 'provider_degraded' &&
+        entry.stage === 'packaging' &&
+        entry.videoId === 'yt-gamma003' &&
+        entry.reason === 'render_source_unavailable' &&
+        entry.outcome === 'clip_omitted'
+    )
+  );
 });

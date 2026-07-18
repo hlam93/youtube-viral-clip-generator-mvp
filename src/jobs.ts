@@ -51,7 +51,8 @@ export class JobStore {
       progressPct: 0,
       clipsReadyCount: 0,
       clips: [],
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      renderedFilePaths: new Map()
     };
 
     this.jobs.set(jobId, job);
@@ -69,6 +70,10 @@ export class JobStore {
 
   findClip(jobId: string, clipId: string) {
     return this.jobs.get(jobId)?.clips.find((clip) => clip.clipId === clipId) ?? null;
+  }
+
+  getRenderedFilePath(jobId: string, clipId: string) {
+    return this.jobs.get(jobId)?.renderedFilePaths.get(clipId) ?? null;
   }
 
   private async run(jobId: string) {
@@ -180,7 +185,9 @@ export class JobStore {
 
       markStage('packaging');
       await delay(100);
-      const packaged = this.pipeline.packageClips(jobId, selected);
+      const packagingResult = await this.pipeline.packageClips(jobId, selected);
+      const packaged = packagingResult.clips;
+      job.renderedFilePaths = packagingResult.renderedFilePaths;
       packagedClips = packaged;
 
       for (const [index, clip] of packaged.entries()) {

@@ -14,6 +14,9 @@ interface JobStoreLike {
   getJob(jobId: string): ReturnType<JobStore['getJob']>;
   getClips(jobId: string): ReturnType<JobStore['getClips']>;
   findClip(jobId: string, clipId: string): ReturnType<JobStore['findClip']>;
+  // Optional so pre-existing test JobStoreLike fakes (which never produce mode:'rendered' clips)
+  // do not need updating; when absent, /rendered falls back to the pre-EXE-0010 redirect behavior.
+  getRenderedFilePath?(jobId: string, clipId: string): ReturnType<JobStore['getRenderedFilePath']>;
 }
 
 interface AppOptions {
@@ -198,6 +201,17 @@ export const createApp = (clientDir: string, jobs?: JobStoreLike, options: AppOp
       return;
     }
 
+    const renderedFilePath =
+      clip.mode === 'rendered' ? jobStore.getRenderedFilePath?.(request.params.jobId, request.params.clipId) : null;
+
+    if (renderedFilePath && existsSync(renderedFilePath)) {
+      response.sendFile(renderedFilePath);
+      return;
+    }
+
+    // Degrade gracefully (EXE-0010): no rendered file available (e.g. no licensed render source
+    // provider configured, or the render attempt failed) -- fall back to timestamp playback rather
+    // than erroring, matching this clip's own playUrl.
     response.redirect(302, clip.playUrl ?? `https://www.youtube.com/watch?v=${clip.videoId}`);
   });
 

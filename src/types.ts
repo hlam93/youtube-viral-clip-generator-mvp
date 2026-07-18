@@ -79,4 +79,6 @@ export interface JobState {
   clips: ClipCard[];
   createdAt: number;
   error?: string;
+  // clipId -> local rendered file path. Server-side only; never serialized to a client response.
+  renderedFilePaths: Map<string, string>;
 }
