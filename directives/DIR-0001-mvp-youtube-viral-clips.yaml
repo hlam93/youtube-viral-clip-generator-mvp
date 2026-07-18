@@ -6,7 +6,7 @@ metadata:
     - product
     - architecture
     - engineering
-  last_updated: 2026-07-13
+  last_updated: 2026-07-17
 
 context:
   problem_statement: Users need fast keyword-to-clip discovery from YouTube with low-cost deterministic ranking and progressive results.
@@ -26,9 +26,12 @@ context:
 
 delivery:
   release_slices:
-    - SLICE-1-api-and-job-orchestration
-    - SLICE-2-transcript-windowing-and-scoring
-    - SLICE-3-selection-packaging-and-progressive-feed
+    - EXE-0001
+    - EXE-0002
+    - EXE-0003
+    - EXE-0004
+    - EXE-0005
+    - EXE-0006
   dependencies:
     - YouTube Data API key configured
     - Hume API key configured
@@ -45,7 +48,7 @@ delivery:
       - Runtime secrets must be set via host environment variable settings.
 
 security:
-  scope: business-app
+  scope: business
   data_classification: internal
   trust_boundaries:
     - browser -> api
