@@ -7,6 +7,12 @@ metadata:
     - architecture
     - engineering
   last_updated: 2026-07-17
+  reference_artifacts:
+    - directives/config/scoring-config.v1.yaml
+    - directives/config/limits-thresholds-matrix.v1.yaml
+    - directives/contracts/api-cache-schemas.v1.yaml
+    - directives/policies/deterministic-ranking-policy.v1.yaml
+    - directives/standards/delivery-guidelines.v1.yaml
 
 context:
   problem_statement: Users need fast keyword-to-clip discovery from YouTube with low-cost deterministic ranking and progressive results.
