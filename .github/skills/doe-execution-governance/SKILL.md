@@ -42,7 +42,8 @@ medium+/business-scope one.
   `amendments` (only add it if a *substantive* claim in an already-complete record — a risk tier,
   a residual risk, a release recommendation — needed correcting after the fact; append an entry
   rather than editing the original fields, and don't spawn a full new EXE-#### record just to
-  document one correction — see DIR-0002 non-goals), `implementation.preview`/
+  document one correction — correction cost should stay proportionate to the correction),
+  `implementation.preview`/
   `implementation.deployment` (use `N/A` for non-web slices, or omit if the surrounding section
   allows it).
 - Keep list items to one concise, factual sentence. An evidence entry names the command, file, or

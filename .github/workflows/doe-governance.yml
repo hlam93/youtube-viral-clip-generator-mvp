@@ -49,6 +49,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Unit-test the portable governance scripts
+        run: bash scripts/test_portable_governance_scripts.sh
       - name: Validate commit messages
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}

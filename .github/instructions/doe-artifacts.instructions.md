@@ -2,8 +2,8 @@
 name: DOE Artifact Conventions
 description: "Use when creating or updating DOE directives, execution records, work-package YAML, backlog artifacts, or traceability metadata in directives/ or executions/."
 applyTo:
-  - "directives/**/*.yaml"
-  - "executions/**/*.yaml"
+  - "directives/*.yaml"
+  - "executions/*.yaml"
 ---
 # DOE Artifact Conventions
 

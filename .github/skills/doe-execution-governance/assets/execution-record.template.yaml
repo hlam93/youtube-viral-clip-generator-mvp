@@ -18,7 +18,9 @@ scope:
 
 handoff:
   # Flow-style mapping recommended for this fixed six-key shape (block style is equally
-  # valid, just bulkier for no added information — see EXE-0011/EXE-0014 for precedent).
+  # valid, just bulkier for no added information: six one-line key/value pairs read as
+  # one glance in flow style, six separate lines in block style, with no field gaining
+  # clarity from the extra vertical space).
   owners: { orchestrator: role or person, project_manager: role or person, ux_ui: role or person, engineering: role or person, qa_security: role or person, ci_enforcement: role or person }
   acceptance_criteria:
     - measurable acceptance criterion
@@ -76,7 +78,8 @@ amendments:
   # *substantive* claim in this already-complete record (a risk tier, a residual risk, a
   # release recommendation) needs correcting after the fact. Append, never edit the
   # original fields above; this keeps what-we-believed-then legible alongside what
-  # changed, without a full new EXE-#### record for every correction (DIR-0002 non-goals).
+  # changed, without a full new EXE-#### record for every correction — correction cost
+  # should stay proportionate to the correction, not force a new record for a one-line fix.
   # Purely structural fixes (a missing directive cross-reference, a metadata date, a YAML
   # formatting defect) don't need an entry — they aren't evidentiary and may be corrected
   # in place directly, disclosed in whatever record is doing that work.

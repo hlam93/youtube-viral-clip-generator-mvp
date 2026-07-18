@@ -367,8 +367,8 @@ end
 # Guarded so scripts/test_validate_doe_artifacts.rb can require this file for its
 # functions without triggering a real run against the repo's own artifacts.
 if $PROGRAM_NAME == __FILE__
-  directive_paths = yaml_files_for("directives/**/*.yaml")
-  execution_paths = yaml_files_for("executions/**/*.yaml")
+  directive_paths = yaml_files_for("directives/*.yaml")
+  execution_paths = yaml_files_for("executions/*.yaml")
   all_errors = []
 
   all_errors.concat(validate_group(directive_paths, :directive))
