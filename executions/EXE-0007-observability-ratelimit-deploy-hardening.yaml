@@ -1,0 +1,160 @@
+metadata:
+  execution_id: EXE-0007
+  title: Job observability, rate-limiter bucket eviction, and deploy-doc hardening
+  status: completed
+  owners:
+    - engineering
+    - qa_security
+    - orchestrator
+  directive_refs:
+    - DIR-0001
+  last_updated: 2026-07-17
+
+scope:
+  objective: Implement DIR-0001's quality.observability logging, close a rate-limiter anonymous-token DoS/memory-growth finding, and correct free-host deployment guidance to match this MVP's in-memory job store/cache/rate-limiter behavior.
+  in_scope:
+    - per-job stage-duration instrumentation and a job_metrics_summary structured log (stageDurationsMs, cacheHitRateLayerA, cacheHitRateLayerB, candidatesProcessed, renderedFallbackRate, jobCostProxyUnits) emitted on every terminal job path
+    - pipeline cacheStats() accessor exposing transcript/audio/ensemble cache snapshotStats()
+    - periodic sweep/eviction of expired rate-limit bucket entries (ipBucket/tokenBucket), piggybacked on existing request-driven calls, no new background timer
+    - README free-host deployment section reorder (Render/Railway recommended ahead of Vercel) with accurate in-memory-state rationale
+    - regression coverage for the rate-limiter sweep and job_metrics_summary fields
+  out_of_scope:
+    - CI wiring for npm test/npm run build in doe-governance.yml
+    - UX/accessibility gate blanket-n/a handling across EXE records
+    - stale metadata.owners field convention in EXE records
+    - missing Dependabot/Renovate config
+    - splitting the monolithic tests/pipeline.test.ts file
+    - request-count-capping within a single rate-limit window (pre-existing, single-key spam vector; distinct from the many-distinct-token vector this slice targets)
+    - discovery/candidate-windowing/rendered-fallback/scoring redesign, UI/UX changes, new dependencies, new endpoints
+
+handoff:
+  owners:
+    orchestrator: DOE Orchestrator
+    project_manager: DOE Project Manager
+    ux_ui: N/A
+    engineering: DOE Full Stack Delivery
+    qa_security: DOE QA Security
+    ci_enforcement: N/A
+  acceptance_criteria:
+    - job_metrics_summary log entry is emitted exactly once per job at completion and contains stageDurationsMs (per-stage object), cacheHitRateLayerA, cacheHitRateLayerB (both numbers in [0,1]), candidatesProcessed (number >= 0), renderedFallbackRate (number in [0,1]), and jobCostProxyUnits (number >= 0); no undocumented field (e.g. cacheHitRateLayerC) is present.
+    - job_metrics_summary is emitted from every terminal job path (happy-path completion, zero-videos degraded early-return, and the failure catch), not only the happy path.
+    - Cache hit-rate fields reflect each job's own delta against the shared pipeline cache (start-of-job vs end-of-job snapshot), not raw cumulative process-lifetime stats.
+    - checkSearchRateLimit continues to enforce existing per-IP and per-token limits identically to pre-change behavior.
+    - Expired rate-limit bucket entries for keys with no further requests are evicted from the in-memory Map after the sweep interval elapses on a subsequent request, bounding memory growth from one-off anonymous tokens.
+    - The sweep is piggybacked on existing request-driven calls only; no new background timer/interval is introduced.
+    - README.md deployment guidance accurately reflects that this MVP's job store, cache, and rate limiter are in-process memory, that Render/Railway's always-on single-container model preserves that state correctly across requests, and that Vercel's serverless model does not guarantee this without an external store this MVP does not yet have.
+    - POST /search, GET /jobs/{jobId}, and GET /jobs/{jobId}/clips payload/status-code contracts are unchanged.
+    - No sensitive data (raw IP, raw token, secrets) is newly logged by the sweep or the observability logging.
+  risk_tier: high
+  risk_rationale: This slice directly patches a rate-limiter DoS/memory-exhaustion finding on the authz/rate-limiting trust boundary of a security.scope business application (anonymous tokens are UUID-format-only with no server-side issuance, per src/requestSecurity.ts), in addition to production job-execution observability logging on the critical path. Reconciled with SYSTEM.md section 4 (business scope defaults medium-or-higher); high is used given the security-relevant nature of the fix.
+  threat_or_abuse_assumptions:
+    - an attacker can mint unlimited distinct UUID-format anonymous tokens (no server-side issuance/registration exists) and use them to flood the rate-limit tokenBucket Map with never-evicted keys, growing memory unbounded over time
+    - observability logging must not leak raw IPs, raw tokens, or secrets into structured logs
+    - the sweep/eviction mechanism must not itself become a performance regression or a new denial vector under concurrent request load
+  validation_plan:
+    engineering:
+      - npm run build
+      - npm test
+      - review of all three job termination paths (happy path, zero-videos degrade, failure catch) for metrics-emission completeness
+    qa_security:
+      - independent verification that the sweep actually bounds Map growth under sustained unique-token flooding, including the burst-window-before-first-sweep scenario
+      - log-content review for sensitive-data leakage in the sweep and job_metrics_summary logging
+      - regression check against existing per-IP/per-token rate-limit enforcement tests
+      - dedicated security_signoff verdict
+    ci_enforcement:
+      - N/A until CI expansion is requested
+  release_gates:
+    - npm run build and npm test are green
+    - job_metrics_summary present and correctly computed on all terminal job paths
+    - rate-limit allow/deny behavior unchanged from pre-slice behavior
+    - no sensitive data introduced into logs
+    - README deployment guidance technically accurate
+  rollback_expectation:
+    - revert src/jobs.ts, src/pipeline.ts, src/rateLimit.ts, README.md, and tests/pipeline.test.ts to their pre-slice state in one deploy; no data migration required since the sweep only affects in-memory Map contents and the observability log is additive
+  rollback_verified: true
+
+quality_gates:
+  definition_of_ready:
+    project_manager: pass
+    ux_ui: n/a
+    qa_security: pass
+    ci_enforcement: n/a
+    notes:
+      - Scope confirmed bounded to the 5 drafted files; no scope creep against MISSION.md-only territory or the explicitly deferred items.
+      - Backlog items and acceptance criteria drafted from DIR-0001's quality.observability list and the rate-limiter DoS finding.
+  definition_of_done:
+    engineering: pass
+    project_manager: pass
+    ux_ui: n/a
+    qa_security: pass
+    ci_enforcement: n/a
+    security_signoff: pass
+    orchestrator: pass
+    notes:
+      - Engineering review found and fixed a real defect in the original draft, job_metrics_summary was only emitted on the happy-path completion, silently dropping observability data for the zero-videos degraded early-return and the failure catch path. Fixed by extracting emission into a shared emitMetricsSummary helper called from all three terminal paths.
+      - QA/Security independently verified the rate-limiter sweep genuinely closes the "grows forever, never evicted" defect, confirmed no sensitive-data leakage in the sweep or observability logging, confirmed no regression in existing rate-limit tests, and issued a pass security_signoff conditioned on residual risks being recorded (see risk.residual_risks) rather than silently dropped.
+      - "Build and test evidence: npm run build succeeded with no errors; npm test 33/33 pass (see validation.evidence)."
+
+backlog:
+  items:
+    - STORY-007-job-observability-metrics
+    - STORY-007-ratelimit-bucket-eviction
+    - STORY-007-deploy-doc-hardening
+  dependencies:
+    - EXE-0001 through EXE-0006 completed on branch 2026/feat/mvp-foundation-app
+    - src/requestSecurity.ts anonymous-token validation behavior (no server-side issuance) as the precondition for the DoS finding this slice mitigates
+
+implementation:
+  systems_touched:
+    - job execution pipeline (stage timing, metrics logging)
+    - cache layer accessor
+    - rate limiter
+    - deployment documentation
+    - tests
+  approach:
+    - instrument job stage transitions with timestamps and derive per-stage durations
+    - expose cache snapshot stats from the pipeline and compute per-job delta hit rates in the job store
+    - emit a single job_metrics_summary structured log from every terminal job path
+    - add a time-bounded sweep to the rate limiter, piggybacked on existing request handling, to evict expired bucket entries
+    - correct README free-host deployment guidance to recommend Render/Railway first, given this MVP's in-memory state
+  preview:
+    run_command: npm run dev
+    verification: Running a search job emits a job_metrics_summary log on completion (and on degraded/failure paths), rate-limit enforcement behaves identically to before, and bucket sizes observably shrink after the sweep interval elapses following a burst of one-off tokens.
+  deployment:
+    free_host_provider: Render or Railway (recommended); Vercel documented as usable only after adding an external store
+    steps:
+      - run npm run build during deployment
+      - verify POST /search, GET /jobs/:jobId, and GET /jobs/:jobId/clips against the deployed instance
+      - confirm job_metrics_summary log entries appear in host log output for completed jobs
+  rollback:
+    - revert the 5 changed files to their pre-slice state
+    - redeploy without changing endpoint contracts or requiring data migration
+
+validation:
+  engineering_checks:
+    - build
+    - job_metrics_summary emission on all terminal job paths
+    - cache delta hit-rate correctness
+  qa_checks:
+    - rate-limiter sweep bounds Map growth under sustained unique-token flooding (burst-before-first-sweep scenario reviewed)
+    - no sensitive-data leakage in sweep or observability logs
+    - existing per-IP/per-token rate-limit enforcement unchanged
+    - README deployment claims technically accurate
+  security_checks:
+    - anonymous-token flood no longer grows rate-limit buckets forever
+    - no raw IP/token/secret leakage in new log fields
+    - sweep introduces no new background timer or denial vector
+  evidence:
+    - npm run build -> pass (no errors)
+    - npm test -> pass (33/33 tests)
+    - job_metrics_summary verified emitted on happy-path, zero-videos-degraded, and failure-catch terminal paths
+    - rate-limiter sweep verified via dedicated test asserting bucket size stays bounded after a one-off token's window and the sweep interval both elapse
+    - QA/Security independent review confirmed no sensitive-data leakage and no regression in existing rate-limit tests
+
+risk:
+  residual_risks:
+    - rate-limit bucket growth is bounded to roughly a 5-minute sweep-interval window rather than the tighter 60-second rate-limit window; a very high-rate distinct-token flood can still cause a meaningful memory spike before the first (or between) sweep(s) fires; follow-up hardening (shorter interval, or a hard max-bucket-size/LRU cap) is not included in this slice
+    - "Pre-existing, out-of-scope: recordAndCheck unconditionally appends to a key's timestamp array even once that key is already over its limit, so a single IP/token hammering the endpoint within one 60s window has no request-count cap, only time-based pruning; distinct vector from the one this slice targets, candidate for a future SEC-#### directive."
+    - deltaHitRate can attribute a sliver of another concurrently-running job's cache hits/misses to a given job, since the pipeline's caches are shared across jobs and jobs are not serialized; accepted as a fast/cheap approximation rather than a defect
+    - in-memory cache/rate-limit/job-store behavior still differs from a production-scale, multi-instance deployment; Vercel remains unusable for this MVP as-is until an external store is added
+  release_recommendation: go-with-risk

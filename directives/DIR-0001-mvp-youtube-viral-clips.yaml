@@ -38,6 +38,7 @@ delivery:
     - EXE-0004
     - EXE-0005
     - EXE-0006
+    - EXE-0007
   dependencies:
     - YouTube Data API key configured
     - Hume API key configured
