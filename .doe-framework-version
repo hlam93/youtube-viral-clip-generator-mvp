@@ -1,0 +1,7 @@
+# Managed by scripts/doe-install.sh — do not edit by hand.
+# The vendored DOE framework core is read-only in this product repo; add your own
+# directives/executions/agents and product code alongside it, never inside it.
+version: v0.1.0-1-g1e4c7ab
+commit: 1e4c7ab
+source: git@github.com:dhynlkm/agentic-secure-agile-sdlc-doe-workflow.git
+installed_at: 2026-07-17T22:52:49Z

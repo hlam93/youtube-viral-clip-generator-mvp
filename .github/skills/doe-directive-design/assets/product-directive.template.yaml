@@ -1,0 +1,68 @@
+metadata:
+  directive_id: DIR-XXXX
+  title: Example product directive
+  status: draft
+  owners:
+    - product
+    - architecture
+  last_updated: YYYY-MM-DD
+
+context:
+  problem_statement: Describe the user or business problem.
+  target_users:
+    - Primary persona
+  # Outcomes are durable "why" / value statements — keep them at the principle level.
+  # Do not restate delivery.acceptance_criteria here in different words; if a future
+  # slice's acceptance criterion doesn't change the underlying "why," it usually
+  # doesn't need a new outcomes line at all.
+  outcomes:
+    - Measurable outcome
+  non_goals:
+    - Out-of-scope item
+
+delivery:
+  # release_slices is populated by orchestration during/after decomposition — a
+  # traceability record of which EXE-#### slices fulfilled this directive, not a
+  # plan the directive author pre-assigns. Leave empty at directive authoring time;
+  # orchestration appends EXE-#### ids here as slices complete.
+  release_slices: []
+  dependencies:
+    - upstream team or system
+  # Acceptance criteria are testable "done" conditions and may be as mechanism-specific
+  # as needed (name the field, script, or validator rule) — this is where that detail
+  # belongs, not in context.outcomes.
+  acceptance_criteria:
+    - observable behavior
+  web_deployment:
+    preview_required: true|false
+    free_host_targets:
+      - provider name or N/A
+    deployment_notes:
+      - deployment constraint or setup note
+
+security:
+  # SYSTEM.md §4's classification is binary and validator-enforced (business|non-business).
+  # "Explicit security request" (used throughout role guidance as "business applications
+  # or explicit security requests") is a per-slice trigger for security depth, not a third
+  # scope value here — a non-business directive the user asked to harden still sets
+  # scope: non-business and notes the elevated depth in abuse_cases below.
+  scope: business|non-business
+  data_classification: public|internal|confidential|restricted
+  trust_boundaries:
+    - browser -> api
+  authn: required|not-required
+  authz_model: role or policy summary
+  abuse_cases:
+    - abuse scenario
+  logging_requirements:
+    - event to record
+
+quality:
+  test_expectations:
+    - unit
+    - integration
+    - regression
+  accessibility:
+    - WCAG expectations or N/A
+  observability:
+    - metrics, logs, traces

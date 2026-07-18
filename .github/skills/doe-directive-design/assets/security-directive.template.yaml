@@ -1,0 +1,43 @@
+metadata:
+  directive_id: SEC-XXXX
+  title: Example security baseline directive
+  status: draft
+  owners:
+    - security
+  last_updated: YYYY-MM-DD
+
+scope:
+  systems:
+    - service-name
+  assets:
+    - credential
+    - customer-data
+  compliance_drivers:
+    - internal policy
+
+controls:
+  authentication:
+    - control statement
+  authorization:
+    - control statement
+  secrets_management:
+    - control statement
+  dependency_security:
+    - control statement
+  logging_and_monitoring:
+    - control statement
+
+verification:
+  required_tests:
+    - access-control-negative-tests
+    - input-validation-tests
+  required_reviews:
+    - threat-model
+    - qa-security-gate
+  release_blockers:
+    - unresolved critical finding
+
+# Executions that implement or harden the controls/verification above should list
+# this directive's id in their own metadata.directive_refs, alongside the product
+# DIR-#### directive, so this baseline stays traceable to real delivered work
+# (SYSTEM.md §9). Security directives do not carry delivery.release_slices.

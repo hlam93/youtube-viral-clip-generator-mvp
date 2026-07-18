@@ -1,0 +1,67 @@
+# DOE governance checks for a product repository that vendored the DOE framework.
+# Installed by scripts/doe-install.sh as .github/workflows/doe-governance.yml. Runs only
+# the portable, repo-agnostic checks — the framework's own consistency/boundary
+# self-checks are maintainer-only and are not shipped (see CONSUMERS.md).
+#
+# This is your starting baseline. Add your product stack's lint/test/build/security jobs
+# alongside it (SYSTEM.md §11 is intentionally end-user-owned; CONSUMERS.md has a checklist).
+name: DOE Governance
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: doe-governance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-doe-artifacts:
+    name: Validate DOE artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - name: Unit-test the validator itself
+        run: ruby scripts/test_validate_doe_artifacts.rb
+      - name: Validate directives and executions YAML shape
+        run: ruby scripts/validate_doe_artifacts.rb
+
+  enforce-commit-policy:
+    name: Enforce commit policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate commit messages
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: bash scripts/check_commit_messages.sh
+
+  enforce-pr-title:
+    name: Enforce PR title policy
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: bash scripts/check_pr_title.sh

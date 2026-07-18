@@ -1,0 +1,132 @@
+metadata:
+  execution_id: EXE-XXXX
+  title: Example execution record
+  status: planned
+  # No metadata.owners field: across every real execution to date it was always the same
+  # [engineering, qa] pair, never validator-checked, and strictly less informative than
+  # handoff.owners below (which names all six roles). Don't reintroduce it.
+  directive_refs:
+    - DIR-0001
+  last_updated: YYYY-MM-DD
+
+scope:
+  objective: Describe the slice being executed.
+  in_scope:
+    - specific change
+  out_of_scope:
+    - deferred change
+
+handoff:
+  # Flow-style mapping recommended for this fixed six-key shape (block style is equally
+  # valid, just bulkier for no added information — see EXE-0011/EXE-0014 for precedent).
+  owners: { orchestrator: role or person, project_manager: role or person, ux_ui: role or person, engineering: role or person, qa_security: role or person, ci_enforcement: role or person }
+  acceptance_criteria:
+    - measurable acceptance criterion
+  risk_tier: low|medium|high|critical # reconcile with SYSTEM.md §4: security.scope "business" defaults to medium-or-higher
+  risk_rationale: rationale for selected risk tier
+  # Required, non-empty, only if a directive_ref is a business-scope directive AND risk_tier is below medium.
+  # The validator rejects that combination unless this field justifies the exception. Omit otherwise.
+  risk_tier_override_rationale: rationale accepted by QA/Security and the Orchestrator during DoR for a lower-than-default tier
+  threat_or_abuse_assumptions:
+    - threat assumption or N/A
+  validation_plan:
+    engineering:
+      - planned engineering validation
+    qa_security:
+      - planned QA/security validation
+    ci_enforcement:
+      - planned automation/policy checks
+  release_gates:
+    - required gate (policy/test/security/evidence)
+  rollback_expectation:
+    - rollback trigger and action
+  # Required (must be exactly `true`, not merely present) when risk_tier is high|critical:
+  # a typed field, not a free-text release_gates mention, so "no rollback needed" can't
+  # be mistaken for a verified rollback path. Omit for low|medium tiers.
+  rollback_verified: true|false
+
+quality_gates:
+  # Same flow-style recommendation as handoff.owners above — these are short, fixed-shape
+  # role-status maps; block style is fine but adds bulk with no added information.
+  definition_of_ready: { project_manager: pass|fail|n/a, ux_ui: pass|fail|n/a, qa_security: pass|fail|n/a, ci_enforcement: pass|fail|n/a, notes: [DoR evidence note] }
+  definition_of_done:
+    # engineering/project_manager/ux_ui/qa_security/ci_enforcement/orchestrator: pass|fail|n/a
+    # (project_manager confirms acceptance criteria met; ux_ui confirms UX/accessibility
+    # criteria met, or n/a if no UX surface). security_signoff is pass|fail (no n/a)
+    # and required only when risk_tier is high|critical — a dedicated security review
+    # distinct from the general qa_security pass. Keep notes as short pointers to where a
+    # fact is already stated (scope.in_scope, validation.*_checks) rather than re-narrating it.
+    { engineering: pass|fail|n/a, project_manager: pass|fail|n/a, ux_ui: pass|fail|n/a, qa_security: pass|fail|n/a, ci_enforcement: pass|fail|n/a, orchestrator: pass|fail|n/a, security_signoff: pass|fail|n/a, notes: [DoD evidence note] }
+
+iteration_log:
+  # Optional. Omit or leave empty for slices that complete without a replan cycle.
+  # Add one entry per SYSTEM.md workflow-step-10 loop: a blocker or finding at ANY of
+  # delivery (step 7), QA/security (step 8), or CI (step 9) that the orchestrator routed
+  # back to the owning role and adapted scope/handoff for — not just QA/CI findings.
+  # Bounded to 2 retry cycles per slice before escalating to the user.
+  - trigger: delivery blocker | QA finding | CI finding | orchestrator adaptation
+    finding: what blocked progress
+    action_taken: re-delegated to role | adjusted handoff contract | re-scoped slice
+    # Validator-enforced enum (unlike trigger/action_taken, which are free text): the
+    # retry-cap and escalation logic both do exact-match comparisons against this value.
+    result: resolved | escalated-to-user | deferred-with-residual-risk
+
+amendments:
+  # Optional. Omit or leave empty — most records never need this. Use only when a
+  # *substantive* claim in this already-complete record (a risk tier, a residual risk, a
+  # release recommendation) needs correcting after the fact. Append, never edit the
+  # original fields above; this keeps what-we-believed-then legible alongside what
+  # changed, without a full new EXE-#### record for every correction (DIR-0002 non-goals).
+  # Purely structural fixes (a missing directive cross-reference, a metadata date, a YAML
+  # formatting defect) don't need an entry — they aren't evidentiary and may be corrected
+  # in place directly, disclosed in whatever record is doing that work.
+  - date: YYYY-MM-DD
+    change: one sentence, what changed
+    rationale: why, and what motivated the correction
+
+# Optional (see SKILL.md "Process Depth Is Risk-Proportionate Too"): omit this whole section
+# if the slice has no backlog items distinct from scope.in_scope. Do not invent a synthetic
+# item just to populate it.
+backlog:
+  items:
+    - STORY-001
+  dependencies:
+    - service or story dependency
+
+implementation:
+  systems_touched:
+    - api
+    - ui
+  approach:
+    - planned implementation step
+  preview:
+    run_command: command or N/A
+    verification: preview verification note or N/A
+  deployment:
+    free_host_provider: provider name or N/A
+    steps:
+      - deployment step or N/A
+  rollback:
+    - rollback note
+
+# When actual execution matched handoff.validation_plan exactly, keep the entry terse ("as
+# planned -- passed") instead of restating the plan's command/description a second time;
+# save full prose here for a result that deviates from the plan -- a finding, a bug caught,
+# evidence the plan didn't anticipate (see doe-execution-governance/SKILL.md).
+validation:
+  engineering_checks:
+    - build
+    - unit tests
+  qa_checks:
+    - regression scenario
+  security_checks:
+    # Required for business applications or explicit security requests.
+    # For non-business applications, use "N/A" unless the change touches sensitive surfaces.
+    - authz negative test
+  evidence:
+    - command, report, or artifact reference
+
+risk:
+  residual_risks:
+    - documented residual risk
+  release_recommendation: go|go-with-risk|no-go
