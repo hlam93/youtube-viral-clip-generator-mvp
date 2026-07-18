@@ -126,6 +126,14 @@ export class ViralClipPipeline {
     return this.audioEmotionProvider.providerName;
   }
 
+  cacheStats() {
+    return {
+      transcriptCache: this.transcriptCache.snapshotStats(),
+      audioCache: this.audioCache.snapshotStats(),
+      ensembleCache: this.ensembleCache.snapshotStats()
+    };
+  }
+
   async discover(keywords: string) {
     return this.discoveryProvider.discover(keywords);
   }

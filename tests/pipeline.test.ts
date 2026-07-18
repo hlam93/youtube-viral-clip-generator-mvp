@@ -29,7 +29,7 @@ import {
   type AudioEmotionProvider,
   type TranscriptEmotionProvider
 } from '../src/scoringProviders.js';
-import { checkSearchRateLimit, resetSearchRateLimits } from '../src/rateLimit.js';
+import { checkSearchRateLimit, rateLimitDebugSnapshot, resetSearchRateLimits } from '../src/rateLimit.js';
 import type { CandidateVideoLite, TranscriptCacheEntry } from '../src/types.js';
 
 const clientDir = resolve(process.cwd(), 'dist', 'client');
@@ -1626,4 +1626,95 @@ test('client render model allowlists rendered and YouTube clip URLs only', () =>
     ),
     null
   );
+});
+
+test('rate limiter sweeps fully-expired keys so a one-off token does not grow the map forever', () => {
+  resetSearchRateLimits();
+  const originalDateNow = Date.now;
+  let fakeNow = originalDateNow();
+  Date.now = () => fakeNow;
+
+  try {
+    resetSearchRateLimits();
+
+    checkSearchRateLimit('203.0.113.10', 'one-off-token-never-reused');
+    assert.deepEqual(rateLimitDebugSnapshot(), { ipBucketSize: 1, tokenBucketSize: 1 });
+
+    // Advance past both the 1-minute rate-limit window (so the one-off key's entries are fully
+    // expired) and the 5-minute sweep interval (so the next call triggers a cleanup pass).
+    fakeNow += 6 * 60_000;
+
+    checkSearchRateLimit('198.51.100.20', 'a-different-token');
+
+    // If the expired key had not been evicted, both buckets would hold 2 entries (the stale
+    // one-off key plus the new key). Bounded-at-1 proves the sweep evicted the expired key.
+    assert.deepEqual(rateLimitDebugSnapshot(), { ipBucketSize: 1, tokenBucketSize: 1 });
+  } finally {
+    Date.now = originalDateNow;
+    resetSearchRateLimits();
+  }
+});
+
+test('job_metrics_summary reports per-job cache/stage/cost observability fields', async () => {
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = createStructuredLogger((entry) => logs.push(entry));
+
+  const pipeline = createPipeline({
+    discoveryProvider: createMockDiscoveryProvider(),
+    transcriptProvider: createMockTranscriptProvider(),
+    ...createTestScoringProviders(),
+    logger
+  });
+  const jobs = new JobStore({ pipeline, logger });
+
+  const created = jobs.createJob('surprise speech budget hack');
+  const job = await waitForJobTerminalState(jobs, created.jobId);
+
+  assert.ok(job.status === 'completed' || job.status === 'degraded');
+
+  const summary = logs.find((entry) => entry.event === 'job_metrics_summary' && entry.jobId === created.jobId);
+  assert.ok(summary, 'expected a job_metrics_summary log entry for the completed job');
+
+  assert.equal(typeof summary?.stageDurationsMs, 'object');
+  assert.equal(typeof summary?.cacheHitRateLayerA, 'number');
+  assert.equal(typeof summary?.cacheHitRateLayerB, 'number');
+  assert.ok((summary?.cacheHitRateLayerA as number) >= 0 && (summary?.cacheHitRateLayerA as number) <= 1);
+  assert.ok((summary?.cacheHitRateLayerB as number) >= 0 && (summary?.cacheHitRateLayerB as number) <= 1);
+  assert.equal(typeof summary?.candidatesProcessed, 'number');
+  assert.ok((summary?.candidatesProcessed as number) >= 0);
+  assert.equal(typeof summary?.renderedFallbackRate, 'number');
+  assert.ok((summary?.renderedFallbackRate as number) >= 0 && (summary?.renderedFallbackRate as number) <= 1);
+  assert.equal(typeof summary?.jobCostProxyUnits, 'number');
+  assert.ok((summary?.jobCostProxyUnits as number) >= 0);
+  // ensembleCache (Layer C) is intentionally not part of DIR-0001's observability list.
+  assert.equal('cacheHitRateLayerC' in (summary ?? {}), false);
+});
+
+test('job_metrics_summary cache hit rate reflects each job own delta, not process-lifetime cumulative stats', async () => {
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = createStructuredLogger((entry) => logs.push(entry));
+
+  const pipeline = createPipeline({
+    discoveryProvider: createMockDiscoveryProvider(),
+    transcriptProvider: createMockTranscriptProvider(),
+    ...createTestScoringProviders(),
+    logger
+  });
+  const jobs = new JobStore({ pipeline, logger });
+
+  const firstJob = jobs.createJob('surprise speech budget hack');
+  await waitForJobTerminalState(jobs, firstJob.jobId);
+
+  const secondJob = jobs.createJob('surprise speech budget hack');
+  await waitForJobTerminalState(jobs, secondJob.jobId);
+
+  const firstSummary = logs.find((entry) => entry.event === 'job_metrics_summary' && entry.jobId === firstJob.jobId);
+  const secondSummary = logs.find((entry) => entry.event === 'job_metrics_summary' && entry.jobId === secondJob.jobId);
+  assert.ok(firstSummary);
+  assert.ok(secondSummary);
+
+  // The first job starts against a cold transcript cache; the second job re-requests the same
+  // keywords/videos, so its transcripts should now come from cache more often than the first
+  // job's did.
+  assert.ok((secondSummary?.cacheHitRateLayerA as number) >= (firstSummary?.cacheHitRateLayerA as number));
 });

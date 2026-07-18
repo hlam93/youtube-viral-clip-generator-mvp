@@ -3,8 +3,8 @@ import { APP_CONFIG } from './config.js';
 import { type StructuredLogger, createStructuredLogger } from './logging.js';
 import { createPipeline, type ViralClipPipeline } from './pipeline.js';
 import { ProviderError } from './providers.js';
-import type { ClipCard, JobStage, JobState, JobStatus } from './types.js';
-import { delay, normalizeKeywords } from './utils.js';
+import type { CandidateVideoLite, ClipCard, JobStage, JobState, JobStatus } from './types.js';
+import { delay, normalizeKeywords, roundScore } from './utils.js';
 
 const stageStatus: Record<JobStage, JobStatus> = {
   discovery: 'running',
@@ -13,6 +13,22 @@ const stageStatus: Record<JobStage, JobStatus> = {
   selection: 'running',
   packaging: 'running',
   done: 'completed'
+};
+
+// Computes a hit rate from the delta between two cache-stats snapshots (end - start) rather
+// than a raw cumulative snapshot, so it is attributable to this job's own cache activity. The
+// pipeline (and therefore its caches) is shared across all jobs in JobStore, and createJob fires
+// `void this.run(jobId)` without serializing concurrent jobs, so a delta computed this way is an
+// approximation: it may include a sliver of another concurrently-running job's hits/misses. This
+// is accepted as a reasonable "fast + cheap" approximation (SYSTEM.md section 6), not a defect
+// requiring per-job cache isolation infrastructure.
+const deltaHitRate = (
+  start: { hits: number; misses: number },
+  end: { hits: number; misses: number }
+) => {
+  const hits = end.hits - start.hits;
+  const misses = end.misses - start.misses;
+  return hits + misses <= 0 ? 0 : roundScore(hits / (hits + misses));
 };
 
 export class JobStore {
@@ -61,10 +77,53 @@ export class JobStore {
       return;
     }
 
+    const stageOrder: JobStage[] = ['discovery', 'transcript', 'scoring', 'selection', 'packaging', 'done'];
+    const stageStartedAt: Partial<Record<JobStage, number>> = {};
+    const markStage = (stage: JobStage) => {
+      stageStartedAt[stage] = Date.now();
+      this.update(job, stage);
+    };
+    const stageDurationsMs = () => {
+      const durations: Partial<Record<JobStage, number>> = {};
+      for (let index = 0; index < stageOrder.length - 1; index += 1) {
+        const stage = stageOrder[index];
+        const start = stageStartedAt[stage];
+        const nextStart = stageStartedAt[stageOrder[index + 1]];
+        if (start !== undefined && nextStart !== undefined) {
+          durations[stage] = nextStart - start;
+        }
+      }
+      return durations;
+    };
+
+    const cacheStatsAtStart = this.pipeline.cacheStats();
+
+    // Emits job_metrics_summary from whichever terminal path the job reaches (happy path,
+    // early degraded-return, or the failure catch below) so cost/observability data is never
+    // silently dropped for jobs that don't make it all the way through packaging. `videos` and
+    // `packaged` default to empty because a job can fail before either is ever produced.
+    const emitMetricsSummary = (videos: CandidateVideoLite[], packaged: ClipCard[]) => {
+      const renderedCount = packaged.filter((clip) => clip.mode === 'rendered').length;
+      const cacheStatsAtEnd = this.pipeline.cacheStats();
+      this.logger.info('job_metrics_summary', {
+        jobId,
+        stageDurationsMs: stageDurationsMs(),
+        cacheHitRateLayerA: deltaHitRate(cacheStatsAtStart.transcriptCache, cacheStatsAtEnd.transcriptCache),
+        cacheHitRateLayerB: deltaHitRate(cacheStatsAtStart.audioCache, cacheStatsAtEnd.audioCache),
+        candidatesProcessed: videos.length,
+        renderedFallbackRate: packaged.length === 0 ? 0 : roundScore(renderedCount / packaged.length),
+        jobCostProxyUnits: Date.now() - job.createdAt
+      });
+    };
+
+    let discoveredVideos: CandidateVideoLite[] = [];
+    let packagedClips: ClipCard[] = [];
+
     try {
-      this.update(job, 'discovery');
+      markStage('discovery');
       await delay(120);
       const videos = await this.pipeline.discover(job.keywords);
+      discoveredVideos = videos;
       if (videos.length === 0) {
         this.logger.warn('provider_degraded', {
           jobId,
@@ -73,11 +132,13 @@ export class JobStore {
           reason: 'empty_result',
           outcome: 'degraded'
         });
+        markStage('done');
+        emitMetricsSummary(discoveredVideos, packagedClips);
         this.finish(job, 'degraded');
         return;
       }
 
-      this.update(job, 'transcript');
+      markStage('transcript');
       await delay(120);
       const contexts = await this.pipeline.buildContexts(videos, { jobId });
       if (videos.length > 0 && contexts.length === 0) {
@@ -99,7 +160,7 @@ export class JobStore {
         });
       }
 
-      this.update(job, 'scoring');
+      markStage('scoring');
       await delay(120);
       const scored = await this.pipeline.scoreWindows(job.keywords, contexts);
       if (scored.degraded) {
@@ -113,18 +174,22 @@ export class JobStore {
         });
       }
 
-      this.update(job, 'selection');
+      markStage('selection');
       await delay(120);
       const selected = this.pipeline.selectTopWindows(scored.windows);
 
-      this.update(job, 'packaging');
+      markStage('packaging');
       await delay(100);
       const packaged = this.pipeline.packageClips(jobId, selected);
+      packagedClips = packaged;
 
       for (const [index, clip] of packaged.entries()) {
         await delay(110);
         this.pushClip(job, clip, index + 1, packaged.length);
       }
+
+      markStage('done');
+      emitMetricsSummary(discoveredVideos, packagedClips);
 
       this.finish(job, packaged.length > 0 ? 'completed' : 'degraded');
     } catch (error) {
@@ -157,6 +222,11 @@ export class JobStore {
         reason,
         detail: job.error
       });
+      // Mark the 'done' timestamp directly (rather than via markStage) so stageDurationsMs can
+      // close out whichever stage was in flight when the failure happened, without re-running
+      // update()'s status/stage side effects that were already set explicitly above.
+      stageStartedAt.done = Date.now();
+      emitMetricsSummary(discoveredVideos, packagedClips);
     }
   }
 
