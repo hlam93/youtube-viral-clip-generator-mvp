@@ -1,0 +1,92 @@
+metadata:
+  execution_id: EXE-0008
+  title: Product build/test CI workflow gate
+  status: completed
+  directive_refs:
+    - DIR-0001
+  last_updated: 2026-07-17
+
+scope:
+  objective: Add a GitHub Actions workflow that runs this MVP's own npm install/build/test on pull requests (and pushes to main) touching app source or dependencies, so a broken build or failing test blocks merge instead of merging cleanly.
+  in_scope:
+    - new .github/workflows/product-ci.yml workflow, separate from doe-governance.yml
+    - trigger on pull_request and push-to-main for changes under src/**, tests/**, package.json, package-lock.json
+    - "job steps: checkout, setup Node 20, npm ci, npm run build, npm test, in that order"
+    - DIR-0001 delivery.release_slices and acceptance_criteria cross-reference for this slice
+  out_of_scope:
+    - modifying .github/workflows/doe-governance.yml
+    - adding new lint/test/build tooling frameworks beyond the existing build/test npm scripts
+    - branch protection rule configuration (GitHub repo settings, not workflow YAML)
+    - deployment automation (already covered by EXE-0007's README deployment guidance)
+
+handoff:
+  owners: { orchestrator: DOE Orchestrator, project_manager: DOE Project Manager, ux_ui: N/A, engineering: DOE CI Enforcement, qa_security: DOE QA Security, ci_enforcement: DOE CI Enforcement }
+  acceptance_criteria:
+    - .github/workflows/product-ci.yml exists, is valid YAML, and runs npm ci, then npm run build, then npm test in that order in a single job.
+    - Workflow triggers on pull_request and on push to main, scoped via paths to src/**, tests/**, package.json, package-lock.json only.
+    - .github/workflows/doe-governance.yml is unmodified.
+    - npm run build and npm test both pass locally prior to merge, confirming the new workflow would go green as-is.
+    - EXE-0008 is cross-referenced bidirectionally with DIR-0001 (metadata.directive_refs here, delivery.release_slices there).
+  risk_tier: low
+  risk_rationale: This slice adds CI tooling only (a new workflow file plus a directive cross-reference edit); it introduces no runtime code path, no new dependency, no change to authn/authz, data handling, or any existing endpoint contract.
+  risk_tier_override_rationale: DIR-0001 is security.scope business, which defaults to medium-or-higher risk tier per SYSTEM.md section 4. Override to low is justified because this slice's entire change surface is CI workflow YAML plus a directive metadata edit -- no application runtime, auth, or data-path code is touched, so there is no security-relevant behavior for a higher tier to gate.
+  threat_or_abuse_assumptions:
+    - N/A -- no runtime/auth/data-path surface is touched; the workflow only runs existing npm scripts against a checked-out PR branch in a standard GitHub-hosted runner sandbox.
+  validation_plan:
+    engineering:
+      - npm run build passes locally
+      - npm test passes locally (33/33)
+      - workflow YAML shape reviewed for correct step ordering and path filters
+    qa_security:
+      - N/A -- no security-sensitive surface introduced; confirmed no secrets or elevated permissions requested by the new workflow
+    ci_enforcement:
+      - ruby scripts/validate_doe_artifacts.rb passes against the new execution record and updated DIR-0001
+  release_gates:
+    - npm run build and npm test both green locally before merge
+    - scripts/validate_doe_artifacts.rb passes
+    - doe-governance.yml left untouched
+  rollback_expectation:
+    - delete .github/workflows/product-ci.yml and revert the DIR-0001 release_slices/acceptance_criteria edit; no runtime or data impact from rollback
+
+quality_gates:
+  definition_of_ready: { project_manager: pass, ux_ui: n/a, qa_security: pass, ci_enforcement: pass, notes: [Slice scoped to workflow YAML + directive cross-reference only, per scope.in_scope above.] }
+  definition_of_done:
+    { engineering: pass, project_manager: pass, ux_ui: n/a, qa_security: pass, ci_enforcement: pass, orchestrator: pass, security_signoff: n/a, notes: [npm run build and npm test both passed locally (33/33) before this record was closed; see validation.evidence.] }
+
+implementation:
+  systems_touched:
+    - CI/GitHub Actions
+  approach:
+    - add .github/workflows/product-ci.yml with checkout, actions/setup-node@v4 pinned to Node 20, npm ci, npm run build, npm test
+    - scope triggers to pull_request and push-to-main with path filters on src/**, tests/**, package.json, package-lock.json
+    - cross-reference DIR-0001 delivery.release_slices and acceptance_criteria with EXE-0008
+  preview:
+    run_command: npm run build && npm test
+    verification: Both commands were run locally in this repository and passed (build succeeded with no errors; 33/33 tests passed), confirming the workflow would go green as-is on the same commit.
+  deployment:
+    free_host_provider: N/A -- CI tooling only, no deployment surface
+    steps:
+      - N/A
+  rollback:
+    - delete .github/workflows/product-ci.yml
+    - revert the DIR-0001 release_slices/acceptance_criteria addition
+
+validation:
+  engineering_checks:
+    - npm run build
+    - npm test
+  qa_checks:
+    - N/A -- no functional/UX behavior change to regress; confirmed existing 33/33 test suite is unaffected
+  security_checks:
+    - "N/A -- non-business, non-runtime change (tooling-only); no secrets, elevated permissions, or new trust boundary introduced by the workflow (permissions: contents: read only)"
+  evidence:
+    - "npm ci -> completed cleanly"
+    - "npm run build -> pass (no errors)"
+    - "npm test -> pass (33/33 tests)"
+    - "ruby scripts/validate_doe_artifacts.rb -> pass (see CI enforcement notes)"
+
+risk:
+  residual_risks:
+    - This workflow enforces build/test on paths under src/**, tests/**, package.json, package-lock.json only; a change that breaks the build via an out-of-path file (for example tsconfig.json or scripts/build.mjs) would not trigger this gate. Follow-up hardening could widen the path filter if that proves to be a real gap.
+    - No branch protection rule was configured in this slice to make the product-ci check required; without that repository setting, the workflow reports status but does not itself block a merge button click.
+  release_recommendation: go

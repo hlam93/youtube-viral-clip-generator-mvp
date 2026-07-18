@@ -39,6 +39,7 @@ delivery:
     - EXE-0005
     - EXE-0006
     - EXE-0007
+    - EXE-0008
   dependencies:
     - YouTube Data API key configured
     - Hume API key configured
@@ -47,6 +48,7 @@ delivery:
     - GET /jobs/{jobId} exposes stage and progress for polling.
     - GET /jobs/{jobId}/clips returns mode, bounds, score, and playable URL.
     - Rendered mode is capped per job and used only on reliability failures.
+    - Pull requests touching app source or dependencies run install/build/test automatically, distinct from DOE governance artifact validation; a failing build or test blocks merge.
   web_deployment:
     preview_required: true
     free_host_targets:
