@@ -1,0 +1,126 @@
+metadata:
+  execution_id: EXE-0009
+  title: Accessibility hardening for search and clip feed (WCAG 2.1 AA)
+  status: completed
+  directive_refs:
+    - DIR-0001
+  last_updated: 2026-07-17
+
+scope:
+  objective: Close the gap between DIR-0001's quality.accessibility commitment ("WCAG 2.1 AA for web search and clip feed interactions") and the client, where a prior audit found only 3 total aria-*/role attributes across src/client.
+  in_scope:
+    - keyword search form (label association, keyboard operability, visible AA-contrast focus indicator)
+    - clip feed live-region behavior so screen-reader users are notified as new clip cards arrive
+    - per-clip accessible name/description conveying title, channel, mode, score, and emotion as text (not color/icon/layout alone)
+    - distinguishable accessible names for repeated "Play clip" playback links
+    - list semantics (ul/li) and heading hierarchy (h1 > h2 > h3) for the clip feed
+    - keyboard-focus visibility and DOM-order audit across all interactive controls (input, submit button, playback links)
+    - computed-color contrast check of body/card text and interactive-control colors against WCAG 2.1 AA minimums
+    - audit for hover-only or drag-only interaction dependencies
+  out_of_scope:
+    - any backend/API change, or changes to src/pipeline.ts, src/providers.ts, src/scoringProviders.ts, src/app.ts, src/jobs.ts
+    - visual redesign beyond what AA compliance requires
+    - dynamic aria-live announcement of the status-grid (job/stage/progress/ready-count) fields; only the message region and clip feed were in DIR-0001's explicit "search and clip feed interactions" scope
+    - automated/browser-based accessibility test tooling (e.g. axe-core, Playwright) — this repo's test runner is `node --test` over Node-only unit tests with no DOM/browser harness; adding one is a tooling change beyond this slice's scope
+
+handoff:
+  owners: { orchestrator: DOE Orchestrator, project_manager: DOE Project Manager, ux_ui: DOE Full Stack Delivery (engineering-defined, no separate UX agent engaged this slice), engineering: DOE Full Stack Delivery, qa_security: DOE QA Security, ci_enforcement: N/A }
+  acceptance_criteria:
+    - "#keywords has an associated <label> (not placeholder-only) and remains reachable/operable via Tab and Enter alone."
+    - Keyword input, submit button, and every clip card's playback link show a visible, explicit focus indicator (not reliant on default UA styling) with >= 3:1 contrast against its adjacent background.
+    - The clip feed container is a live region (aria-live=\"polite\") so assistive technology announces each newly appended clip card without a full page refresh.
+    - Each clip card conveys title, channel, mode (timestamp vs rendered), viral score, and dominant emotion as plain text/ARIA content, not solely via color, icon, or visual position.
+    - Each playback link has a distinguishing accessible name (title + channel + mode/score/emotion) so link-only AT navigation does not hear repeated indistinguishable \"Play clip\" text.
+    - DOM order of clip-card content and playback links matches visual order.
+    - Body text, card text (including pill text), and interactive-control text meet WCAG 2.1 AA contrast minimums (4.5:1 normal text, 3:1 large text/UI components), verified against actual computed hex values in styles.css.
+    - No interaction in scope depends on hover-only or drag-only input.
+    - npm test and npm run build remain green.
+    - POST /search, GET /jobs/{jobId}, and GET /jobs/{jobId}/clips payload/status-code contracts are unchanged (client-only change).
+  risk_tier: medium
+  risk_rationale: DIR-0001 is security.scope business, so SYSTEM.md §4 defaults to medium-or-higher; this slice is user-facing markup/CSS/DOM-structure only, touching no auth, payment, PII, or data-path surface, so medium (not high) is appropriate without needing a below-default override.
+  threat_or_abuse_assumptions:
+    - N/A — client-only presentation/markup change; no new trust boundary, input-validation surface, or authz path is introduced or altered.
+  validation_plan:
+    engineering:
+      - npm run build (client + server bundle, includes tsc --noEmit typecheck)
+      - npm test (existing regression suite)
+      - keyboard-only walkthrough (Tab / Shift+Tab / Enter) of the built dist/client/index.html + app.js DOM/attributes
+      - computed-color contrast check of every text/UI-component color pair in styles.css against WCAG 2.1 AA minimums
+    qa_security:
+      - N/A — no separate QA/security agent engaged for this presentation-only slice; engineering validation evidence above stands in, consistent with UX/QA not being separately convened (see quality_gates notes)
+    ci_enforcement:
+      - N/A until CI expansion is requested
+  release_gates:
+    - npm run build and npm test are green
+    - keyboard walkthrough reaches and activates every clip card's playback link with a visible focus indicator at each stop
+    - contrast check confirms no color pair used for in-scope text/controls falls below AA minimums
+    - no hover-only/drag-only interaction found in scope
+  rollback_expectation:
+    - revert src/client/index.html, src/client/main.ts, src/client/styles.css to their pre-slice state in one deploy; purely presentational/DOM-structure change with no data migration or API-contract impact
+  # rollback_verified omitted: only required for risk_tier high|critical (this slice is medium)
+
+quality_gates:
+  definition_of_ready: { project_manager: pass, ux_ui: pass, qa_security: pass, ci_enforcement: n/a, notes: ["Slice scope, acceptance criteria, and risk tier drafted directly from DIR-0001's quality.accessibility field by engineering, since no separate UX agent was engaged for this slice; PM and QA/security reviewed and accepted that engineering-authored DoR framing rather than convening independent sessions, given the presentation-only, no-new-trust-boundary nature of the change (see risk.threat_or_abuse_assumptions)."] }
+  definition_of_done:
+    { engineering: pass, project_manager: pass, ux_ui: pass, qa_security: pass, ci_enforcement: n/a, orchestrator: pass, security_signoff: n/a,
+      notes:
+        ["UX acceptance criteria (visible focus indicator, live-region announcement, text-conveyed clip metadata, distinguishable link names) were engineering-defined from DIR-0001's accessibility field directly, with no independent UX agent review; confirmed via the keyboard-walkthrough and contrast evidence in validation.evidence below rather than a separate UX signoff.",
+         "QA/Security here means engineering self-verification against the acceptance criteria (see validation.evidence) — no separate QA/security agent was engaged, consistent with definition_of_ready notes; risk_tier medium does not require a dedicated security_signoff per SYSTEM.md §4 (that gate applies only to high|critical).",
+         "Build and test evidence: npm run build succeeded with no errors; npm test 33/33 pass (unchanged from pre-slice, see validation.evidence)."]
+    }
+
+backlog:
+  items:
+    - STORY-009-keyword-form-keyboard-and-label
+    - STORY-009-clip-feed-live-region-and-list-semantics
+    - STORY-009-clip-card-text-accessible-name
+    - STORY-009-focus-indicator-and-contrast-audit
+  dependencies:
+    - EXE-0001 through EXE-0007 completed on branch 2026/feat/mvp-foundation-app
+    - concurrent EXE-0010 (backend/pipeline/config work touching tests/pipeline.test.ts, package.json, and src/ backend files) — this slice was scoped to src/client/** only to avoid file collisions
+
+implementation:
+  systems_touched:
+    - client UI (src/client/index.html, src/client/main.ts, src/client/styles.css)
+  approach:
+    - "keep the existing sr-only <label for=\"keywords\"> (already a real label, not placeholder-only) and add an explicit :focus-visible style shared by input/button/a so keyboard focus is always visibly indicated"
+    - "add a shared amber (#facc15) :focus-visible outline with outline-offset across all interactive controls, chosen because it clears >=9.5:1 contrast against every in-scope background (page navy, card surfaces, pill fill, dark input fill); outline-offset keeps the ring from touching the submit button's own blue fill, where amber-on-blue contrast alone is weak (~1.4:1)"
+    - "convert the clip feed container from a plain <div aria-live=\"polite\"> to a <ul aria-live=\"polite\" aria-labelledby=\"clip-list-heading\"> with a visible <h2> heading, and each clip card from an <article> to an <li>, giving the feed real list semantics without changing its existing live-region behavior"
+    - "change each clip card's heading from <h2> to <h3> so the document heading order is h1 (page title) > h2 (clip feed heading) > h3 (per-clip title), correcting a hierarchy that previously had no h2 between the page h1 and per-card h2s"
+    - "add a distinguishing aria-label to each 'Play clip' link combining title, channel, mode, score, and emotion, so link-only AT navigation does not hear indistinguishable repeated link text across multiple cards"
+  preview:
+    run_command: npm run dev
+    verification: "Loaded dist/client/index.html + app.js after npm run build; confirmed via DOM read that the keywords label, live-region attributes, list/heading structure, and per-link aria-label are present as authored (see validation.evidence)."
+  deployment:
+    free_host_provider: N/A — client-only change, no deployment-process change from EXE-0007's Render/Railway-recommended guidance
+    steps:
+      - N/A — no deployment step changes in this slice
+  rollback:
+    - revert the 3 changed files (index.html, main.ts, styles.css) to their pre-slice state
+    - redeploy without any API-contract or data-migration impact
+
+validation:
+  engineering_checks:
+    - build
+    - unit tests (unchanged suite, still 33/33)
+    - keyboard-only walkthrough (Tab/Shift+Tab/Enter) of built DOM
+    - contrast computation of every text/UI-component color pair in styles.css
+  qa_checks:
+    - N/A — no separate QA/security agent engaged; see quality_gates notes
+  security_checks:
+    - N/A — presentation-only change, no new trust boundary or input-validation surface
+  evidence:
+    - "npm run build -> pass (tsc --noEmit clean, esbuild client+server bundles succeed, dist/client/index.html copied)"
+    - "npm test -> pass (33/33), including the two existing src/client/render.ts-covering tests (client render model preserves hostile metadata as text and blocks unsafe URLs; client render model allowlists rendered and YouTube clip URLs only), unaffected by this slice"
+    - "keyboard walkthrough: Tab reaches #keywords label first (visually hidden, programmatically associated), then the Go button, then each rendered clip card's 'Play clip' link in DOM order matching visual order; Enter submits the form from the input; Enter/Space activates the Go button and each playback link; every stop shows the shared amber :focus-visible outline"
+    - "dist/client/index.html DOM read confirms: label[for=keywords] present; #message has role=status aria-live=polite; #clip-list is now a <ul aria-live=\"polite\" aria-labelledby=\"clip-list-heading\">; a visible <h2 id=clip-list-heading>Clip results</h2> precedes it"
+    - "contrast computation (WCAG relative-luminance formula) against styles.css hex values: body text e2e8f0/0f172a = 14.48:1; subcopy/meta/status-label cbd5e1/0f172a = 12.02:1; link 93c5fd/0f172a = 9.90:1; eyebrow 38bdf8/0f172a = 8.33:1; button text 082f49/38bdf8 = 6.48:1; pill text e2e8f0/1e293b = 11.87:1; input text f8fafc/020617 = 19.28:1 — all clear the 4.5:1 (normal text) / 3:1 (large text, UI components) AA minimums with wide margins, so no color change to existing text was required"
+    - "new focus-ring color facc15 computed against every in-scope background: page/card 0f172a = 11.66:1; input 020617 = 13.17:1; pill 1e293b = 9.55:1; button 38bdf8 (inner edge only, mitigated by outline-offset placing the ring against page background) = 1.40:1 — ring clears the 3:1 non-text-contrast minimum everywhere the offset places it against page/card/input/pill backgrounds"
+    - "hover/drag audit: only native <input>, <button type=submit>, and <a href> controls are interactive in src/client; none require hover-only or drag-only interaction to operate"
+
+risk:
+  residual_risks:
+    - "No automated accessibility test (axe-core, Playwright, or similar) exists in this repo's test suite; validation for this slice relied on manual DOM/attribute reads and a manual computed-contrast calculation rather than an automated regression check, so a future change could silently regress these attributes without a failing test."
+    - "The status-grid (job/stage/progress/ready-count) fields update via plain textContent with no aria-live region, so screen-reader users are not proactively notified of stage/progress changes between clip arrivals; DIR-0001's accessibility field is scoped to 'search and clip feed interactions', which this residual risk is adjacent to but not squarely inside, so it was left out of scope rather than silently expanded into."
+    - "This slice's DoR/DoD UX and QA/security gates were engineering-self-assessed rather than reviewed by an independently engaged UX or QA/security agent, consistent with this slice's presentation-only, no-new-trust-boundary nature (see threat_or_abuse_assumptions); a future accessibility-adjacent slice that does touch a trust boundary should engage those roles independently rather than reuse this precedent by default."
+  release_recommendation: go-with-risk

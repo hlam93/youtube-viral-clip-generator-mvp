@@ -52,9 +52,10 @@ const renderClip = (clip: ClipCard) => {
   }
 
   const model = buildClipRenderModel(clip, window.location.origin);
-  const card = document.createElement('article');
-  card.className = 'clip-card';
-  const title = document.createElement('h2');
+  const item = document.createElement('li');
+  item.className = 'clip-card';
+
+  const title = document.createElement('h3');
   title.textContent = model.title;
 
   const channel = document.createElement('p');
@@ -77,13 +78,17 @@ const renderClip = (clip: ClipCard) => {
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
     link.textContent = 'Play clip';
+    link.setAttribute(
+      'aria-label',
+      `Play clip: ${model.title} by ${model.channelName} (${model.modeLabel}, ${model.scoreLabel}, ${model.emotionLabel})`
+    );
     linkWrapper.append(link);
   } else {
     linkWrapper.textContent = 'Clip link unavailable.';
   }
 
-  card.append(title, channel, pillRow, linkWrapper);
-  clipList.append(card);
+  item.append(title, channel, pillRow, linkWrapper);
+  clipList.append(item);
 };
 
 const refreshStatus = (job: JobResponse) => {
