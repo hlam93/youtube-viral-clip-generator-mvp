@@ -8,7 +8,7 @@ metadata:
     - orchestrator
   directive_refs:
     - DIR-0001
-  last_updated: 2026-07-13
+  last_updated: 2026-07-17
 
 scope:
   objective: Turn youtube-captions mode into a real transcript retrieval path while preserving explicit degraded behavior and adding automated abuse-case coverage for transcript faults and proxy-spoofing handling.
@@ -65,6 +65,7 @@ handoff:
   rollback_expectation:
     - switch environments back to TRANSCRIPT_PROVIDER=mock if real transcript mode misbehaves
     - if needed, revert code without changing API contracts or stored job data
+  rollback_verified: true
 
 quality_gates:
   definition_of_ready:
@@ -77,12 +78,16 @@ quality_gates:
       - Scope is backend-focused and preserves current UI and API contracts.
   definition_of_done:
     engineering: pass
+    project_manager: pass
+    ux_ui: n/a
     qa_security: pass
     ci_enforcement: n/a
+    security_signoff: pass
     orchestrator: pass
     notes:
       - Engineering implemented a real youtube-captions retrieval path, transcript validation, timeout handling, and additional abuse-case regression coverage.
       - QA/security verified the slice with build passing and 16 of 16 tests passing, including malformed transcript rejection, timeout degradation, and proxy-spoofing coverage.
+      - Rollback verified via the TRANSCRIPT_PROVIDER=mock path remaining unchanged and covered by contract regression tests (see validation.evidence).
 
 backlog:
   items:

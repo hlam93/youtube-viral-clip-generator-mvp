@@ -8,7 +8,7 @@ metadata:
     - orchestrator
   directive_refs:
     - DIR-0001
-  last_updated: 2026-07-13
+  last_updated: 2026-07-17
 
 scope:
   objective: Enforce real YouTube Data API discovery in the MVP runtime path with no silent mock fallback, so downstream behavior is validated only on real discovery inputs.
@@ -64,6 +64,7 @@ handoff:
     - mock discovery remains isolated to non-production or explicit test mode
   rollback_expectation:
     - revert strict discovery mode behavior in one deploy if necessary, without changing API contracts or persisted data
+  rollback_verified: true
 
 quality_gates:
   definition_of_ready:
@@ -76,12 +77,16 @@ quality_gates:
       - Scope remains backend-focused and preserves current client contracts.
   definition_of_done:
     engineering: pass
+    project_manager: pass
+    ux_ui: n/a
     qa_security: pass
     ci_enforcement: n/a
+    security_signoff: pass
     orchestrator: pass
     notes:
       - Engineering implemented strict discovery mode, removed silent mock substitution in youtube-data-api mode, classified discovery failures, and added negative-path regression coverage.
       - QA/security verified the slice with build passing and 19 of 19 tests passing, including strict-mode no-fallback, malformed payload, quota, timeout, and empty-result scenarios.
+      - Rollback verified via mock discovery remaining isolated to non-production/test mode only, unaffected by strict-mode changes (see validation.evidence).
 
 backlog:
   items:

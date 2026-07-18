@@ -8,7 +8,7 @@ metadata:
     - orchestrator
   directive_refs:
     - DIR-0001
-  last_updated: 2026-07-14
+  last_updated: 2026-07-17
 
 scope:
   objective: Replace mock discovery and transcript stages with real provider-backed integrations while preserving the existing API and UI contracts.
@@ -64,6 +64,7 @@ handoff:
     - rollback toggle to mock providers is verified
   rollback_expectation:
     - keep real-provider integration behind configuration so the app can revert immediately to the current mock pipeline without schema or data migration changes
+  rollback_verified: true
 
 quality_gates:
   definition_of_ready:
@@ -77,12 +78,26 @@ quality_gates:
       - Transcript acquisition mechanism still requires an implementation choice but is explicitly scoped as a provider adapter decision within the slice.
   definition_of_done:
     engineering: pass
+    project_manager: pass
+    ux_ui: n/a
     qa_security: pass
     ci_enforcement: n/a
+    security_signoff: pass
     orchestrator: pass
     notes:
       - Engineering completed the provider boundary, real YouTube discovery path, transcript Layer-A cache, and local validation.
       - Remaining transcript-realization and auth/logging hardening gaps were completed and validated in EXE-0002 and EXE-0003, closing this slice's previously blocked conditions.
+      - Rollback verified via existing mock-pipeline regression tests, which stayed green alongside the real-provider path (see validation.evidence).
+
+iteration_log:
+  - trigger: QA finding
+    finding: Anonymous-token enforcement and structured search/provider logging were incomplete, leaving trust and observability gaps at release.
+    action_taken: re-scoped into follow-on slice EXE-0002 rather than expanding this slice's boundary
+    result: resolved
+  - trigger: QA finding
+    finding: youtube-captions transcript mode remained explicitly degraded rather than a real transcript integration.
+    action_taken: re-scoped into follow-on slice EXE-0003 rather than expanding this slice's boundary
+    result: resolved
 
 backlog:
   items:

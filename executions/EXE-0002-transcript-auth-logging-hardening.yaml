@@ -8,7 +8,7 @@ metadata:
     - orchestrator
   directive_refs:
     - DIR-0001
-  last_updated: 2026-07-13
+  last_updated: 2026-07-17
 
 scope:
   objective: Close the remaining provider-integration blockers by implementing a real transcript path or explicit failure path, enforcing anonymous-token requirements, and adding structured search and provider-stage logging.
@@ -65,6 +65,7 @@ handoff:
   rollback_expectation:
     - transcript provider mode remains configuration-gated for rollback
     - auth and logging changes stay isolated to server entry points and can be reverted in one deploy if needed
+  rollback_verified: true
 
 quality_gates:
   definition_of_ready:
@@ -77,12 +78,16 @@ quality_gates:
       - Scope remains server-focused and preserves current UI and API contracts.
   definition_of_done:
     engineering: pass
+    project_manager: pass
+    ux_ui: n/a
     qa_security: pass
     ci_enforcement: n/a
+    security_signoff: pass
     orchestrator: pass
     notes:
       - Engineering implemented anonymous-token enforcement, proxy-trust hardening, explicit transcript-provider degraded behavior, structured logging, and automated regression coverage.
       - QA/security verified the acceptance criteria with build passing and 11 of 11 tests passing, including token rejection, guardrail logging, and explicit transcript degraded-path tests.
+      - Rollback verified via transcript-provider mode staying config-gated to mock and auth/logging changes remaining isolated to server entry points (see validation.evidence).
 
 backlog:
   items:

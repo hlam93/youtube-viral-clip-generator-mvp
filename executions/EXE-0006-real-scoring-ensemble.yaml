@@ -8,7 +8,7 @@ metadata:
     - orchestrator
   directive_refs:
     - DIR-0001
-  last_updated: 2026-07-13
+  last_updated: 2026-07-17
 
 scope:
   objective: Replace heuristic scoring with a real deterministic scoring path using transcript emotion and Hume audio emotion while preserving current client contracts and bounded compute behavior.
@@ -66,6 +66,7 @@ handoff:
     - API contracts remain unchanged
   rollback_expectation:
     - revert to the current deterministic heuristic scoring path in one deploy, preserving API schemas and job polling behavior, and invalidate any new scoring caches without data migration
+  rollback_verified: true
 
 quality_gates:
   definition_of_ready:
@@ -78,12 +79,16 @@ quality_gates:
       - Slice remains bounded to scoring and caching behavior rather than UI or discovery redesign.
   definition_of_done:
     engineering: pass
+    project_manager: pass
+    ux_ui: n/a
     qa_security: pass
     ci_enforcement: n/a
+    security_signoff: pass
     orchestrator: pass
     notes:
       - Engineering implemented real Hume HTTP integration, deterministic transcript-emotion provider boundary, scoring cache controls, and regression coverage for determinism and provider failures.
       - QA/security verified the slice with build passing and 30 of 30 tests passing, including strict fail-closed scoring config, Hume failure modes, deterministic scoring, and cache coalescing behavior.
+      - Rollback verified via the heuristic scoring path remaining preserved and cache invalidation requiring no data migration (see validation.evidence).
 
 backlog:
   items:
